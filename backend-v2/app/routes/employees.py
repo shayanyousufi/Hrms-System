@@ -1,0 +1,685 @@
+import math
+import random
+import string
+import csv
+import io
+from datetime import timedelta, datetime as dt
+from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File
+from fastapi.responses import Response
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, func, or_, desc, asc, text
+import base64
+
+from app.core.database import get_db
+from app.core.deps import get_current_user
+from app.models.employee import (
+    Employee, Attendance, LeaveRecord, EmployeeDocument, ActivityLog, Task, Meeting
+)
+from app.schemas.employee import (
+    EmployeeCreate, EmployeeUpdate, EmployeeResponse, EmployeeListResponse,
+    PaginatedEmployees, AttendanceResponse, LeaveResponse, LeaveResponseWithEmployee,
+    DocumentResponse, ActivityLogResponse, TaskResponse, MeetingResponse,
+    PaginatedAttendance, PaginatedLeaves, PaginatedActivities,
+    PaginatedTasks, PaginatedMeetings, LeaveCreate, LeaveUpdate,
+)
+
+router = APIRouter(prefix="/api/employees", tags=["employees"], dependencies=[Depends(get_current_user)])
+
+
+def generate_employee_id():
+    rand = "".join(random.choices(string.digits, k=4))
+    return f"EMP-{rand}"
+
+
+@router.get("", response_model=PaginatedEmployees)
+async def list_employees(
+    page: int = Query(1, ge=1),
+    per_page: int = Query(10, ge=1, le=100),
+    search: str = Query("", description="Search by name, email, employee_id"),
+    department: str = Query("", description="Filter by department"),
+    status_filter: str = Query("", alias="status", description="Filter by status"),
+    sort_by: str = Query("id", description="Sort field"),
+    sort_order: str = Query("desc", description="Sort order: asc or desc"),
+    date_from: str = Query("", description="Filter from date (YYYY-MM-DD)"),
+    date_to: str = Query("", description="Filter to date (YYYY-MM-DD)"),
+    db: AsyncSession = Depends(get_db),
+):
+    query = select(Employee)
+    count_query = select(func.count(Employee.id))
+
+    if search:
+        search_filter = or_(
+            Employee.first_name.ilike(f"%{search}%"),
+            Employee.last_name.ilike(f"%{search}%"),
+            Employee.email.ilike(f"%{search}%"),
+            Employee.employee_id.ilike(f"%{search}%"),
+        )
+        query = query.where(search_filter)
+        count_query = count_query.where(search_filter)
+
+    if department:
+        query = query.where(Employee.department == department)
+        count_query = count_query.where(Employee.department == department)
+
+    if status_filter:
+        query = query.where(Employee.employment_status == status_filter)
+        count_query = count_query.where(Employee.employment_status == status_filter)
+
+    if date_from:
+        from datetime import date as date_type
+        try:
+            df = date_type.fromisoformat(date_from)
+            query = query.where(Employee.joining_date >= df)
+            count_query = count_query.where(Employee.joining_date >= df)
+        except ValueError:
+            pass
+
+    if date_to:
+        from datetime import date as date_type
+        try:
+            dt_val = date_type.fromisoformat(date_to)
+            query = query.where(Employee.joining_date <= dt_val)
+            count_query = count_query.where(Employee.joining_date <= dt_val)
+        except ValueError:
+            pass
+
+    total_result = await db.execute(count_query)
+    total = total_result.scalar()
+
+    sort_column = getattr(Employee, sort_by, Employee.id)
+    if sort_order == "asc":
+        query = query.order_by(asc(sort_column))
+    else:
+        query = query.order_by(desc(sort_column))
+
+    query = query.offset((page - 1) * per_page).limit(per_page)
+    result = await db.execute(query)
+    employees = result.scalars().all()
+
+    return PaginatedEmployees(
+        total=total,
+        page=page,
+        per_page=per_page,
+        total_pages=math.ceil(total / per_page) if total > 0 else 0,
+        employees=[EmployeeListResponse.model_validate(e) for e in employees],
+    )
+
+
+@router.get("/departments")
+async def list_departments(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Employee.department).distinct())
+    return [row[0] for row in result.all()]
+
+
+@router.get("/stats/overview")
+async def get_stats(db: AsyncSession = Depends(get_db)):
+    from datetime import date as date_type
+
+    total_result = await db.execute(select(func.count(Employee.id)))
+    total = total_result.scalar() or 0
+
+    status_result = await db.execute(
+        select(Employee.employment_status, func.count(Employee.id)).group_by(Employee.employment_status)
+    )
+    status_counts = {row[0]: row[1] for row in status_result.all()}
+
+    dept_result = await db.execute(
+        select(Employee.department, func.count(Employee.id)).group_by(Employee.department)
+    )
+    departments = [{"name": row[0], "count": row[1]} for row in dept_result.all()]
+
+    today = date_type.today()
+    att_result = await db.execute(
+        select(Attendance.status, func.count(Attendance.id)).where(Attendance.date == today).group_by(Attendance.status)
+    )
+    attendance_today = {row[0]: row[1] for row in att_result.all()}
+    if not attendance_today:
+        att_result = await db.execute(
+            select(Attendance.status, func.count(Attendance.id))
+            .where(Attendance.date == today - timedelta(days=1))
+            .group_by(Attendance.status)
+        )
+        attendance_today = {row[0]: row[1] for row in att_result.all()}
+
+    leave_result = await db.execute(select(func.count(LeaveRecord.id)).where(LeaveRecord.status == "Pending"))
+    pending_leaves = leave_result.scalar() or 0
+
+    return {
+        "total_employees": total,
+        "active": status_counts.get("Active", 0),
+        "on_leave": status_counts.get("On Leave", 0),
+        "inactive": status_counts.get("Inactive", 0),
+        "pending_leaves": pending_leaves,
+        "departments": departments,
+        "attendance_today": {
+            "present": attendance_today.get("Present", 0),
+            "absent": attendance_today.get("Absent", 0),
+            "leave": attendance_today.get("Leave", 0),
+        },
+    }
+
+
+@router.get("/{employee_id}", response_model=EmployeeResponse)
+async def get_employee(employee_id: str, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Employee).where(Employee.employee_id == employee_id))
+    employee = result.scalar_one_or_none()
+    if not employee:
+        raise HTTPException(status_code=404, detail="Employee not found")
+    return EmployeeResponse.model_validate(employee)
+
+
+@router.post("", response_model=EmployeeResponse, status_code=201)
+async def create_employee(data: EmployeeCreate, db: AsyncSession = Depends(get_db)):
+    existing_email = await db.execute(select(Employee).where(Employee.email == data.email))
+    if existing_email.scalar_one_or_none():
+        raise HTTPException(status_code=400, detail="Email already exists")
+
+    emp_id = generate_employee_id()
+    while True:
+        existing = await db.execute(select(Employee).where(Employee.employee_id == emp_id))
+        if not existing.scalar_one_or_none():
+            break
+        emp_id = generate_employee_id()
+
+    employee = Employee(employee_id=emp_id, **data.model_dump())
+    db.add(employee)
+    await db.commit()
+    await db.refresh(employee)
+
+    log = ActivityLog(employee_id=employee.id, action="Employee created", performed_by="System")
+    db.add(log)
+    await db.commit()
+
+    return EmployeeResponse.model_validate(employee)
+
+
+@router.put("/{employee_id}", response_model=EmployeeResponse)
+async def update_employee(employee_id: str, data: EmployeeUpdate, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Employee).where(Employee.employee_id == employee_id))
+    employee = result.scalar_one_or_none()
+    if not employee:
+        raise HTTPException(status_code=404, detail="Employee not found")
+
+    if data.email and data.email != employee.email:
+        existing_email = await db.execute(select(Employee).where(Employee.email == data.email))
+        if existing_email.scalar_one_or_none():
+            raise HTTPException(status_code=400, detail="Email already exists")
+
+    update_data = data.model_dump(exclude_unset=True)
+    for key, value in update_data.items():
+        setattr(employee, key, value)
+
+    await db.commit()
+    await db.refresh(employee)
+
+    log = ActivityLog(employee_id=employee.id, action="Employee profile updated", performed_by="System")
+    db.add(log)
+    await db.commit()
+
+    return EmployeeResponse.model_validate(employee)
+
+
+@router.delete("/{employee_id}")
+async def delete_employee(employee_id: str, hard: bool = False, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Employee).where(Employee.employee_id == employee_id))
+    employee = result.scalar_one_or_none()
+    if not employee:
+        raise HTTPException(status_code=404, detail="Employee not found")
+
+    if hard:
+        await db.execute(text(f"DELETE FROM activity_logs WHERE employee_id = {employee.id}"))
+        await db.execute(text(f"DELETE FROM employee_documents WHERE employee_id = {employee.id}"))
+        await db.execute(text(f"DELETE FROM leave_records WHERE employee_id = {employee.id}"))
+        await db.execute(text(f"DELETE FROM attendance WHERE employee_id = {employee.id}"))
+        await db.delete(employee)
+        await db.commit()
+        return {"message": "Employee permanently deleted"}
+    else:
+        employee.employment_status = "Inactive"
+        log = ActivityLog(employee_id=employee.id, action="Employee deactivated (soft delete)", performed_by="System")
+        db.add(log)
+        await db.commit()
+        return {"message": "Employee marked as inactive"}
+
+
+@router.get("/{employee_id}/attendance", response_model=PaginatedAttendance)
+async def get_attendance(
+    employee_id: str,
+    page: int = Query(1, ge=1),
+    per_page: int = Query(10, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+):
+    emp_result = await db.execute(select(Employee).where(Employee.employee_id == employee_id))
+    employee = emp_result.scalar_one_or_none()
+    if not employee:
+        raise HTTPException(status_code=404, detail="Employee not found")
+
+    count_query = select(func.count(Attendance.id)).where(Attendance.employee_id == employee.id)
+    total_result = await db.execute(count_query)
+    total = total_result.scalar() or 0
+
+    query = (
+        select(Attendance)
+        .where(Attendance.employee_id == employee.id)
+        .order_by(desc(Attendance.date))
+        .offset((page - 1) * per_page)
+        .limit(per_page)
+    )
+    result = await db.execute(query)
+    records = [AttendanceResponse.model_validate(a) for a in result.scalars().all()]
+
+    return PaginatedAttendance(
+        total=total, page=page, per_page=per_page,
+        total_pages=math.ceil(total / per_page) if total > 0 else 0,
+        records=records,
+    )
+
+
+@router.post("/attendance/checkin")
+async def check_in(employee_id: int, db: AsyncSession = Depends(get_db)):
+    today = dt.now().date()
+    result = await db.execute(
+        select(Attendance).where(Attendance.employee_id == employee_id, Attendance.date == today)
+    )
+    existing = result.scalar_one_or_none()
+    if existing:
+        raise HTTPException(status_code=400, detail="Already checked in today")
+
+    now = dt.now()
+    check_in_time = now.strftime("%H:%M")
+    status = "Late" if now.hour > 9 or (now.hour == 9 and now.minute > 0) else "Present"
+    attendance = Attendance(employee_id=employee_id, date=today, check_in=check_in_time, status=status)
+    db.add(attendance)
+
+    emp = await db.get(Employee, employee_id)
+    if emp:
+        log = ActivityLog(employee_id=emp.id, action=f"Checked in at {check_in_time}", performed_by=emp.first_name)
+        db.add(log)
+
+    await db.commit()
+    return {"message": f"Checked in at {check_in_time}", "check_in": check_in_time}
+
+
+@router.post("/attendance/checkout")
+async def check_out(employee_id: int, db: AsyncSession = Depends(get_db)):
+    today = dt.now().date()
+    result = await db.execute(
+        select(Attendance).where(Attendance.employee_id == employee_id, Attendance.date == today)
+    )
+    attendance = result.scalar_one_or_none()
+    if not attendance:
+        raise HTTPException(status_code=400, detail="No check-in found for today")
+    if attendance.check_out:
+        raise HTTPException(status_code=400, detail="Already checked out today")
+
+    now = dt.now()
+    check_out_time = now.strftime("%H:%M")
+    attendance.check_out = check_out_time
+
+    emp = await db.get(Employee, employee_id)
+    if emp:
+        log = ActivityLog(employee_id=emp.id, action=f"Checked out at {check_out_time}", performed_by=emp.first_name)
+        db.add(log)
+
+    await db.commit()
+    return {"message": f"Checked out at {check_out_time}", "check_out": check_out_time}
+
+
+@router.get("/attendance/today/{employee_id}")
+async def get_today_attendance(employee_id: int, db: AsyncSession = Depends(get_db)):
+    today = dt.now().date()
+    result = await db.execute(
+        select(Attendance).where(Attendance.employee_id == employee_id, Attendance.date == today)
+    )
+    attendance = result.scalar_one_or_none()
+    if not attendance:
+        return {"checked_in": False, "check_in": None, "check_out": None}
+    return {
+        "checked_in": True,
+        "check_in": attendance.check_in,
+        "check_out": attendance.check_out,
+    }
+
+
+@router.put("/{employee_id}/profile-picture")
+async def upload_profile_picture(employee_id: str, file: UploadFile = File(...), db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Employee).where(Employee.employee_id == employee_id))
+    employee = result.scalar_one_or_none()
+    if not employee:
+        raise HTTPException(status_code=404, detail="Employee not found")
+
+    content = await file.read()
+    base64_image = base64.b64encode(content).decode("utf-8")
+    employee.profile_picture = f"data:{file.content_type};base64,{base64_image}"
+
+    log = ActivityLog(employee_id=employee.id, action="Profile picture updated", performed_by=employee.first_name)
+    db.add(log)
+    await db.commit()
+
+    return {"message": "Profile picture uploaded successfully"}
+
+
+@router.get("/{employee_id}/leaves", response_model=PaginatedLeaves)
+async def get_leaves(
+    employee_id: str,
+    page: int = Query(1, ge=1),
+    per_page: int = Query(10, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+):
+    emp_result = await db.execute(select(Employee).where(Employee.employee_id == employee_id))
+    employee = emp_result.scalar_one_or_none()
+    if not employee:
+        raise HTTPException(status_code=404, detail="Employee not found")
+
+    count_query = select(func.count(LeaveRecord.id)).where(LeaveRecord.employee_id == employee.id)
+    total_result = await db.execute(count_query)
+    total = total_result.scalar() or 0
+
+    query = (
+        select(LeaveRecord)
+        .where(LeaveRecord.employee_id == employee.id)
+        .order_by(desc(LeaveRecord.start_date))
+        .offset((page - 1) * per_page)
+        .limit(per_page)
+    )
+    result = await db.execute(query)
+    records = [LeaveResponse.model_validate(l) for l in result.scalars().all()]
+
+    return PaginatedLeaves(
+        total=total, page=page, per_page=per_page,
+        total_pages=math.ceil(total / per_page) if total > 0 else 0,
+        records=records,
+    )
+
+
+@router.get("/{employee_id}/documents", response_model=list[DocumentResponse])
+async def get_documents(employee_id: str, db: AsyncSession = Depends(get_db)):
+    emp_result = await db.execute(select(Employee).where(Employee.employee_id == employee_id))
+    employee = emp_result.scalar_one_or_none()
+    if not employee:
+        raise HTTPException(status_code=404, detail="Employee not found")
+
+    result = await db.execute(
+        select(EmployeeDocument).where(EmployeeDocument.employee_id == employee.id)
+    )
+    return [DocumentResponse.model_validate(d) for d in result.scalars().all()]
+
+
+@router.get("/{employee_id}/activities", response_model=PaginatedActivities)
+async def get_activities(
+    employee_id: str,
+    page: int = Query(1, ge=1),
+    per_page: int = Query(10, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+):
+    emp_result = await db.execute(select(Employee).where(Employee.employee_id == employee_id))
+    employee = emp_result.scalar_one_or_none()
+    if not employee:
+        raise HTTPException(status_code=404, detail="Employee not found")
+
+    count_query = select(func.count(ActivityLog.id)).where(ActivityLog.employee_id == employee.id)
+    total_result = await db.execute(count_query)
+    total = total_result.scalar() or 0
+
+    query = (
+        select(ActivityLog)
+        .where(ActivityLog.employee_id == employee.id)
+        .order_by(desc(ActivityLog.timestamp))
+        .offset((page - 1) * per_page)
+        .limit(per_page)
+    )
+    result = await db.execute(query)
+    records = [ActivityLogResponse.model_validate(a) for a in result.scalars().all()]
+
+    return PaginatedActivities(
+        total=total, page=page, per_page=per_page,
+        total_pages=math.ceil(total / per_page) if total > 0 else 0,
+        records=records,
+    )
+
+
+@router.get("/dashboard/tasks", response_model=PaginatedTasks)
+async def get_tasks(
+    page: int = Query(1, ge=1),
+    per_page: int = Query(10, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+):
+    count_query = select(func.count(Task.id))
+    total_result = await db.execute(count_query)
+    total = total_result.scalar() or 0
+
+    query = (
+        select(Task)
+        .order_by(desc(Task.id))
+        .offset((page - 1) * per_page)
+        .limit(per_page)
+    )
+    result = await db.execute(query)
+    records = [TaskResponse.model_validate(t) for t in result.scalars().all()]
+
+    return PaginatedTasks(
+        total=total, page=page, per_page=per_page,
+        total_pages=math.ceil(total / per_page) if total > 0 else 0,
+        records=records,
+    )
+
+
+@router.get("/dashboard/meetings", response_model=PaginatedMeetings)
+async def get_meetings(
+    page: int = Query(1, ge=1),
+    per_page: int = Query(10, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+):
+    count_query = select(func.count(Meeting.id))
+    total_result = await db.execute(count_query)
+    total = total_result.scalar() or 0
+
+    query = (
+        select(Meeting)
+        .order_by(desc(Meeting.id))
+        .offset((page - 1) * per_page)
+        .limit(per_page)
+    )
+    result = await db.execute(query)
+    records = [MeetingResponse.model_validate(m) for m in result.scalars().all()]
+
+    return PaginatedMeetings(
+        total=total, page=page, per_page=per_page,
+        total_pages=math.ceil(total / per_page) if total > 0 else 0,
+        records=records,
+    )
+
+
+@router.post("/leaves", response_model=LeaveResponse, status_code=201)
+async def create_leave(data: LeaveCreate, db: AsyncSession = Depends(get_db)):
+    leave = LeaveRecord(
+        employee_id=data.employee_id,
+        leave_type=data.leave_type,
+        start_date=data.start_date,
+        end_date=data.end_date,
+        reason=data.reason,
+        status="Pending",
+    )
+    db.add(leave)
+    await db.commit()
+    await db.refresh(leave)
+
+    emp = await db.get(Employee, data.employee_id)
+    if emp:
+        log = ActivityLog(employee_id=emp.id, action=f"Leave request submitted: {data.leave_type}", performed_by=emp.first_name)
+        db.add(log)
+        await db.commit()
+
+    return LeaveResponse.model_validate(leave)
+
+
+@router.put("/leaves/{leave_id}", response_model=LeaveResponse)
+async def update_leave(leave_id: int, data: LeaveUpdate, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(LeaveRecord).where(LeaveRecord.id == leave_id))
+    leave = result.scalar_one_or_none()
+    if not leave:
+        raise HTTPException(status_code=404, detail="Leave record not found")
+
+    # Revert previously approved leave's deduction before applying a new state.
+    if leave.status == "Approved":
+        emp = await db.get(Employee, leave.employee_id)
+        if emp and emp.leave_balance is not None:
+            emp.leave_balance = (emp.leave_balance or 0) + _leave_days(leave)
+
+    leave.status = data.status
+    await db.commit()
+    await db.refresh(leave)
+
+    # Deduct balance when a leave is approved (deduct once).
+    if data.status == "Approved":
+        emp = await db.get(Employee, leave.employee_id)
+        if emp:
+            days = _leave_days(leave)
+            emp.leave_balance = (emp.leave_balance or 0) - days
+            await db.commit()
+
+    emp = await db.get(Employee, leave.employee_id)
+    if emp:
+        log = ActivityLog(employee_id=emp.id, action=f"Leave {data.status.lower()} for {leave.leave_type}", performed_by="System")
+        db.add(log)
+        await db.commit()
+
+    return LeaveResponse.model_validate(leave)
+
+
+@router.get("/leaves/all", response_model=PaginatedLeaves)
+async def get_all_leaves(
+    page: int = Query(1, ge=1),
+    per_page: int = Query(10, ge=1, le=100),
+    status_filter: str = Query("", alias="status"),
+    db: AsyncSession = Depends(get_db),
+):
+    query = select(LeaveRecord)
+    count_query = select(func.count(LeaveRecord.id))
+
+    if status_filter:
+        query = query.where(LeaveRecord.status == status_filter)
+        count_query = count_query.where(LeaveRecord.status == status_filter)
+
+    total_result = await db.execute(count_query)
+    total = total_result.scalar() or 0
+
+    query = query.order_by(desc(LeaveRecord.id)).offset((page - 1) * per_page).limit(per_page)
+    result = await db.execute(query)
+    leaves = result.scalars().all()
+
+    records = []
+    for l in leaves:
+        emp = await db.get(Employee, l.employee_id)
+        records.append(
+            LeaveResponseWithEmployee(
+                id=l.id, employee_id=l.employee_id, leave_type=l.leave_type,
+                start_date=l.start_date, end_date=l.end_date,
+                status=l.status, reason=l.reason,
+                first_name=emp.first_name if emp else None,
+                last_name=emp.last_name if emp else None,
+                employee_code=emp.employee_id if emp else None,
+                leave_balance=emp.leave_balance if emp else None,
+            )
+        )
+
+    return PaginatedLeaves(
+        total=total, page=page, per_page=per_page,
+        total_pages=math.ceil(total / per_page) if total > 0 else 0,
+        records=records,
+    )
+
+
+def _leave_days(leave: LeaveRecord) -> int:
+    """Number of calendar days a leave spans (minimum 1)."""
+    days = (leave.end_date - leave.start_date).days + 1
+    return max(1, days)
+
+
+@router.get("/export/employees.csv")
+async def export_employees_csv(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Employee).order_by(Employee.id))
+    employees = result.scalars().all()
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        "Employee ID", "First Name", "Last Name", "Email", "Phone",
+        "Department", "Designation", "Status", "Joining Date",
+        "Salary", "Leave Balance",
+    ])
+    for e in employees:
+        writer.writerow([
+            e.employee_id, e.first_name, e.last_name, e.email, e.phone or "",
+            e.department, e.designation, e.employment_status,
+            e.joining_date.isoformat() if e.joining_date else "",
+            e.salary if e.salary is not None else "",
+            e.leave_balance if e.leave_balance is not None else "",
+        ])
+
+    return Response(
+        content="\ufeff" + output.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": "attachment; filename=employees.csv"},
+    )
+
+
+@router.get("/export/attendance.csv")
+async def export_attendance_csv(
+    date_from: str = Query("", description="YYYY-MM-DD"),
+    date_to: str = Query("", description="YYYY-MM-DD"),
+    status_filter: str = Query("", alias="status"),
+    db: AsyncSession = Depends(get_db),
+):
+    query = select(Attendance, Employee).join(Employee, Attendance.employee_id == Employee.id)
+    if date_from:
+        query = query.where(Attendance.date >= dt.strptime(date_from, "%Y-%m-%d").date())
+    if date_to:
+        query = query.where(Attendance.date <= dt.strptime(date_to, "%Y-%m-%d").date())
+    if status_filter:
+        query = query.where(Attendance.status == status_filter)
+    result = await db.execute(query.order_by(Attendance.date.desc()))
+    rows = result.all()
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        "Employee ID", "First Name", "Last Name", "Date",
+        "Check In", "Check Out", "Status",
+    ])
+    for att, emp in rows:
+        writer.writerow([
+            emp.employee_id, emp.first_name, emp.last_name,
+            att.date.isoformat(), att.check_in or "", att.check_out or "", att.status,
+        ])
+
+    return Response(
+        content="\ufeff" + output.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": "attachment; filename=attendance.csv"},
+    )
+
+
+@router.get("/export/leaves.csv")
+async def export_leaves_csv(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(LeaveRecord).order_by(LeaveRecord.id.desc()))
+    leaves = result.scalars().all()
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        "ID", "Employee ID", "Leave Type", "Start Date",
+        "End Date", "Status", "Reason",
+    ])
+    for l in leaves:
+        emp = await db.get(Employee, l.employee_id)
+        writer.writerow([
+            l.id, emp.employee_id if emp else l.employee_id, l.leave_type,
+            l.start_date.isoformat(), l.end_date.isoformat(), l.status, l.reason or "",
+        ])
+
+    return Response(
+        content="\ufeff" + output.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": "attachment; filename=leaves.csv"},
+    )
