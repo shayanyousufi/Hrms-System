@@ -1,8 +1,10 @@
 from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.core.config import settings
 from app.core.database import engine, Base
 from app.core.deps import get_current_user
+from app.core.migrations import apply_patch_migrations
 from app.routes.auth import router as auth_router
 from app.routes.employees import router as employees_router
 from app.routes.attendance import router as attendance_router
@@ -27,6 +29,7 @@ async def startup():
     from app.models.employee import Employee, Attendance, LeaveRecord, EmployeeDocument, ActivityLog, Task, Meeting
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    await apply_patch_migrations()
 
 
 @app.get("/", dependencies=[Depends(get_current_user)])
@@ -34,18 +37,21 @@ async def root():
     return {"message": "Tech Land Auth API"}
 
 
-@app.get("/db", dependencies=[Depends(get_current_user)])
-async def view_database():
-    from sqlalchemy import text
-    from app.core.database import async_session
-    async with async_session() as db:
-        tables = {}
-        result = await db.execute(text("SELECT table_name FROM information_schema.tables WHERE table_schema='public'"))
-        table_names = [r[0] for r in result.fetchall()]
-        for tname in table_names:
-            cols = await db.execute(text(f"SELECT column_name, data_type FROM information_schema.columns WHERE table_name='{tname}' AND table_schema='public' ORDER BY ordinal_position"))
-            columns = [{"name": c[0], "type": c[1]} for c in cols.fetchall()]
-            rows = await db.execute(text(f'SELECT * FROM "{tname}"'))
-            data = [dict(zip([c["name"] for c in columns], [str(v) if v is not None else None for v in row])) for row in rows.fetchall()]
-            tables[tname] = {"columns": columns, "rows": data, "count": len(data)}
-        return {"database": "techland (PostgreSQL)", "total_tables": len(tables), "tables": tables}
+# Development-only diagnostic endpoint. Never registered in production.
+if settings.ENVIRONMENT != "production":
+
+    @app.get("/db", dependencies=[Depends(get_current_user)])
+    async def view_database():
+        from sqlalchemy import text
+        from app.core.database import async_session
+        async with async_session() as db:
+            tables = {}
+            result = await db.execute(text("SELECT table_name FROM information_schema.tables WHERE table_schema='public'"))
+            table_names = [r[0] for r in result.fetchall()]
+            for tname in table_names:
+                cols = await db.execute(text(f"SELECT column_name, data_type FROM information_schema.columns WHERE table_name='{tname}' AND table_schema='public' ORDER BY ordinal_position"))
+                columns = [{"name": c[0], "type": c[1]} for c in cols.fetchall()]
+                rows = await db.execute(text(f'SELECT * FROM "{tname}"'))
+                data = [dict(zip([c["name"] for c in columns], [str(v) if v is not None else None for v in row])) for row in rows.fetchall()]
+                tables[tname] = {"columns": columns, "rows": data, "count": len(data)}
+            return {"database": "techland (PostgreSQL)", "total_tables": len(tables), "tables": tables}

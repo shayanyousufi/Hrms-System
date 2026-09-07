@@ -1,5 +1,7 @@
 from datetime import datetime
-from sqlalchemy import Integer, String, DateTime, ForeignKey, func
+from typing import Optional
+
+from sqlalchemy import Integer, String, DateTime, Boolean, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -21,5 +23,7 @@ class PasswordReset(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     email: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
-    code: Mapped[str] = mapped_column(String(6), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(128), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    used: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")

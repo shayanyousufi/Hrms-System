@@ -1,8 +1,10 @@
-import random
+import hashlib
+import secrets
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from app.core.database import get_db
 from app.core.security import (
@@ -25,6 +27,10 @@ from app.schemas.auth import (
 )
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
+
+
+def _hash_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
 @router.post("/register", response_model=AuthResponse)
@@ -70,58 +76,78 @@ async def login(data: LoginRequest, db: AsyncSession = Depends(get_db)):
     )
 
 
-@router.post("/forgot-password", dependencies=[Depends(get_current_user)])
+@router.post("/forgot-password")
 async def forgot_password(data: ForgotPasswordRequest, db: AsyncSession = Depends(get_db)):
+    user = await get_user_by_email(db, data.email)
+    if user:
+        # Invalidate any previous unused reset requests for this account
+        # so only the newest token can be redeemed.
+        await db.execute(
+            update(PasswordReset)
+            .where(PasswordReset.email == user.email, PasswordReset.used.is_(False))
+            .values(used=True)
+        )
+
+        token = secrets.token_urlsafe(48)
+        reset = PasswordReset(
+            email=user.email,
+            token_hash=_hash_token(token),
+            expires_at=datetime.now(timezone.utc)
+            + timedelta(minutes=settings.PASSWORD_RESET_TOKEN_EXPIRE_MINUTES),
+            used=False,
+        )
+        db.add(reset)
+        await db.commit()
+
+        if settings.SMTP_USER and settings.SMTP_PASSWORD:
+            send_reset_email(user.email, token)
+        elif settings.ENVIRONMENT != "production":
+            # Development-only convenience so the flow can be tested without SMTP.
+            print(f"[DEV ONLY] Password reset token for {user.email}: {token}")
+
+    # Uniform response — do not reveal whether the account exists.
+    return {"message": "If an account exists for this email, a password reset code has been sent."}
+
+
+@router.post("/reset-password")
+async def reset_password(data: ResetPasswordRequest, db: AsyncSession = Depends(get_db)):
     user = await get_user_by_email(db, data.email)
     if not user:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Email not found"
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired reset token"
         )
 
-    code = "".join([str(random.randint(0, 9)) for _ in range(6)])
-
-    reset = PasswordReset(email=data.email, code=code)
-    db.add(reset)
-    await db.commit()
-
-    email_sent = False
-    email_error = ""
-    if settings.SMTP_USER and settings.SMTP_PASSWORD:
-        email_sent, email_error = send_reset_email(data.email, code)
-
-    return {
-        "message": f"Reset code sent to {data.email}",
-        "email_sent": email_sent,
-        "email_error": email_error,
-    }
-
-
-@router.post("/reset-password", dependencies=[Depends(get_current_user)])
-async def reset_password(data: ResetPasswordRequest, db: AsyncSession = Depends(get_db)):
+    token_hash = _hash_token(data.token)
     result = await db.execute(
-        select(PasswordReset)
-        .where(PasswordReset.email.isnot(None))
-        .order_by(PasswordReset.id.desc())
-        .limit(1)
+        select(PasswordReset).where(
+            PasswordReset.email == data.email,
+            PasswordReset.token_hash == token_hash,
+            PasswordReset.used.is_(False),
+        )
     )
     reset = result.scalar_one_or_none()
-
-    if not reset or reset.code != data.code:
+    if not reset:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid or expired code"
+            detail="Invalid or expired reset token"
         )
 
-    user = await get_user_by_email(db, reset.email)
-    if not user:
+    now = datetime.now(timezone.utc)
+    if reset.expires_at is None or reset.expires_at < now:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found"
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Reset token has expired"
         )
 
     user.password_hash = hash_password(data.new_password)
-    await db.delete(reset)
+    reset.used = True
+    # Any other pending reset requests for this account are consumed as well.
+    await db.execute(
+        update(PasswordReset)
+        .where(PasswordReset.email == data.email, PasswordReset.used.is_(False))
+        .values(used=True)
+    )
     await db.commit()
 
     return {"message": "Password reset successful"}

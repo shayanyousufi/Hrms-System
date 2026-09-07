@@ -28,17 +28,25 @@ export interface AuthResponse {
 
 export interface ForgotPasswordResponse {
   message: string;
-  code?: string;
-  email_sent?: boolean;
-  email_error?: string;
+}
+
+export interface ResetPasswordPayload {
+  email: string;
+  token: string;
+  new_password: string;
 }
 
 export const authApi = {
   login: (data: LoginPayload) => api.post<AuthResponse>("/auth/login", data),
   register: (data: RegisterPayload) => api.post<AuthResponse>("/auth/register", data),
-  forgotPassword: (email: string) => api.post<ForgotPasswordResponse>("/auth/forgot-password", { email }),
-  resetPassword: (code: string, newPassword: string) =>
-    api.post("/auth/reset-password", { code, new_password: newPassword }),
+  forgotPassword: (email: string) =>
+    api.post<ForgotPasswordResponse>("/auth/forgot-password", { email }),
+  resetPassword: (email: string, token: string, newPassword: string) =>
+    api.post<{ message: string }>("/auth/reset-password", {
+      email,
+      token,
+      new_password: newPassword,
+    } as ResetPasswordPayload),
   getMe: (token: string) =>
     api.get<AuthResponse["user"]>("/auth/me", {
       headers: { Authorization: `Bearer ${token}` },

@@ -132,10 +132,7 @@ export default function EmployeeDetailPage({ params }: { params: { id: string } 
     if (!employee) return;
     setDeleting(true);
     try {
-      const params = hard ? "?hard=true" : "";
-      await fetch(`http://localhost:8001/api/employees/${employee.employee_id}${params}`, {
-        method: "DELETE",
-      });
+      await employeesApi.delete(employee.employee_id, hard);
       router.push("/employees");
     } catch (e) {
       console.error(e);
