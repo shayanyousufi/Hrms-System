@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import DashboardLayout from "@/components/DashboardLayout";
 import { employeesApi, PaginatedResponse, downloadCsv } from "@/lib/employeeApi";
+import { canManageEmployees } from "@/lib/auth";
 
 const departments = ["Engineering", "Design", "HR", "Finance", "Marketing", "Sales"];
 const statuses = ["Active", "On Leave", "Inactive"];
@@ -35,6 +36,7 @@ export default function EmployeesPage() {
 function EmployeesContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const [isAdmin, setIsAdmin] = useState(false);
   const [data, setData] = useState<PaginatedResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState(searchParams.get("search") || "");
@@ -72,6 +74,11 @@ function EmployeesContent() {
   }, [page, search, department, status, sortBy, sortOrder, dateFrom, dateTo]);
 
   useEffect(() => {
+    const role = localStorage.getItem("role");
+    setIsAdmin(canManageEmployees(role));
+  }, []);
+
+  useEffect(() => {
     fetchEmployees();
   }, [fetchEmployees]);
 
@@ -107,14 +114,18 @@ function EmployeesContent() {
             <p className="text-sm text-gray-400 mt-0.5">Manage your team members and their information</p>
           </div>
           <div className="flex items-center gap-2 self-start">
-            <button onClick={() => downloadCsv("/employees/export/employees.csv", "employees.csv")} className="inline-flex items-center gap-2 bg-white hover:bg-gray-50 text-gray-700 text-sm font-semibold px-4 py-2.5 rounded-xl transition-all border border-gray-200 hover:border-gray-300">
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
-              Export CSV
-            </button>
-            <Link href="/employees/new" className="inline-flex items-center gap-2 bg-primary-500 hover:bg-primary-600 text-white text-sm font-semibold px-5 py-2.5 rounded-xl transition-all shadow-md shadow-primary-200 hover:shadow-lg hover:shadow-primary-300">
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" /></svg>
-              Add Employee
-            </Link>
+            {isAdmin && (
+              <>
+                <button onClick={() => downloadCsv("/employees/export/employees.csv", "employees.csv")} className="inline-flex items-center gap-2 bg-white hover:bg-gray-50 text-gray-700 text-sm font-semibold px-4 py-2.5 rounded-xl transition-all border border-gray-200 hover:border-gray-300">
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+                  Export CSV
+                </button>
+                <Link href="/employees/new" className="inline-flex items-center gap-2 bg-primary-500 hover:bg-primary-600 text-white text-sm font-semibold px-5 py-2.5 rounded-xl transition-all shadow-md shadow-primary-200 hover:shadow-lg hover:shadow-primary-300">
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" /></svg>
+                  Add Employee
+                </Link>
+              </>
+            )}
           </div>
         </div>
 

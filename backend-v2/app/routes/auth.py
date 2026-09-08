@@ -13,10 +13,11 @@ from app.core.security import (
     create_access_token,
     get_user_by_email,
 )
-from app.core.deps import get_current_user
+from app.core.deps import get_current_user, require_roles
 from app.core.email import send_reset_email
-from app.core.config import settings
+from app.core.config import settings, UserRole
 from app.models.user import User, PasswordReset
+from app.models.employee import Employee
 from app.schemas.auth import (
     RegisterRequest,
     LoginRequest,
@@ -24,6 +25,8 @@ from app.schemas.auth import (
     ResetPasswordRequest,
     AuthResponse,
     UserResponse,
+    UpdateRoleRequest,
+    LinkUserRequest,
 )
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -46,6 +49,7 @@ async def register(data: RegisterRequest, db: AsyncSession = Depends(get_db)):
         email=data.email,
         password_hash=hash_password(data.password),
         phone=data.phone,
+        role=UserRole.EMPLOYEE.value,
     )
     db.add(user)
     await db.commit()
@@ -55,7 +59,7 @@ async def register(data: RegisterRequest, db: AsyncSession = Depends(get_db)):
 
     return AuthResponse(
         access_token=access_token,
-        user=UserResponse(id=user.id, email=user.email, phone=user.phone),
+        user=UserResponse(id=user.id, email=user.email, phone=user.phone, role=user.role),
     )
 
 
@@ -72,7 +76,7 @@ async def login(data: LoginRequest, db: AsyncSession = Depends(get_db)):
 
     return AuthResponse(
         access_token=access_token,
-        user=UserResponse(id=user.id, email=user.email, phone=user.phone),
+        user=UserResponse(id=user.id, email=user.email, phone=user.phone, role=user.role),
     )
 
 
@@ -155,4 +159,86 @@ async def reset_password(data: ResetPasswordRequest, db: AsyncSession = Depends(
 
 @router.get("/me", response_model=UserResponse)
 async def get_me(current_user: User = Depends(get_current_user)):
-    return UserResponse(id=current_user.id, email=current_user.email, phone=current_user.phone)
+    return UserResponse(
+        id=current_user.id,
+        email=current_user.email,
+        phone=current_user.phone,
+        role=current_user.role,
+    )
+
+
+@router.get("/users", response_model=list[UserResponse])
+async def list_users(
+    current_user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.HR)),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(select(User).order_by(User.id))
+    return [
+        UserResponse(id=u.id, email=u.email, phone=u.phone, role=u.role)
+        for u in result.scalars().all()
+    ]
+
+
+@router.patch("/users/{user_id}/role", response_model=UserResponse)
+async def update_role(
+    user_id: int,
+    data: UpdateRoleRequest,
+    current_user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.HR)),
+    db: AsyncSession = Depends(get_db),
+):
+    """Change a user's role.
+
+    - SUPER_ADMIN may assign any role (including HR / SUPER_ADMIN).
+    - HR may only assign EMPLOYEE or MANAGER (cannot self-escalate or mint admins).
+    """
+    target = await db.get(User, user_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    requested = data.role.value if isinstance(data.role, UserRole) else str(data.role)
+
+    if current_user.role == UserRole.HR.value and requested in {
+        UserRole.HR.value,
+        UserRole.SUPER_ADMIN.value,
+    }:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="HR can only assign EMPLOYEE or MANAGER roles",
+        )
+
+    target.role = requested
+    await db.commit()
+    await db.refresh(target)
+    return UserResponse(id=target.id, email=target.email, phone=target.phone, role=target.role)
+
+
+@router.post("/users/{user_id}/link-employee", response_model=UserResponse)
+async def link_employee(
+    user_id: int,
+    data: LinkUserRequest,
+    current_user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.HR)),
+    db: AsyncSession = Depends(get_db),
+):
+    """Link an existing user account to an existing employee record.
+
+    Resolves the disconnected users<->employees data by HR/Super Admin action,
+    so EMPLOYEE self-service and MANAGER team scoping work for those accounts.
+    """
+    target = await db.get(User, user_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    employee = await db.get(Employee, data.employee_id)
+    if not employee:
+        raise HTTPException(status_code=404, detail="Employee not found")
+
+    if employee.user_id is not None and employee.user_id != target.id:
+        raise HTTPException(
+            status_code=400,
+            detail="Employee is already linked to a different user account",
+        )
+
+    employee.user_id = target.id
+    await db.commit()
+    await db.refresh(target)
+    return UserResponse(id=target.id, email=target.email, phone=target.phone, role=target.role)

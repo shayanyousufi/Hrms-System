@@ -5,6 +5,18 @@ const api = axios.create({
   headers: { "Content-Type": "application/json" },
 });
 
+api.interceptors.request.use((config) => {
+  if (typeof window !== "undefined") {
+    const token = localStorage.getItem("token");
+    if (token) {
+      config.headers.Authorization = `Bearer ${token}`;
+    }
+  }
+  return config;
+});
+
+export type UserRole = "SUPER_ADMIN" | "HR" | "MANAGER" | "EMPLOYEE";
+
 export interface LoginPayload {
   email: string;
   password: string;
@@ -16,14 +28,17 @@ export interface RegisterPayload {
   phone?: string;
 }
 
+export interface AuthUser {
+  id: number;
+  email: string;
+  phone: string | null;
+  role: UserRole;
+}
+
 export interface AuthResponse {
   access_token: string;
   token_type: string;
-  user: {
-    id: number;
-    email: string;
-    phone: string | null;
-  };
+  user: AuthUser;
 }
 
 export interface ForgotPasswordResponse {
@@ -51,4 +66,9 @@ export const authApi = {
     api.get<AuthResponse["user"]>("/auth/me", {
       headers: { Authorization: `Bearer ${token}` },
     }),
+  listUsers: () => api.get<AuthUser[]>("/auth/users"),
+  updateRole: (userId: number, role: UserRole) =>
+    api.patch<AuthUser>(`/auth/users/${userId}/role`, { role }),
+  linkEmployee: (userId: number, employeeId: number) =>
+    api.post<AuthUser>(`/auth/users/${userId}/link-employee`, { employee_id: employeeId }),
 };

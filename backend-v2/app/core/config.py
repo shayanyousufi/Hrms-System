@@ -1,7 +1,15 @@
 import os
+import enum
 from dotenv import load_dotenv
 
 load_dotenv()
+
+
+class UserRole(str, enum.Enum):
+    SUPER_ADMIN = "SUPER_ADMIN"
+    HR = "HR"
+    MANAGER = "MANAGER"
+    EMPLOYEE = "EMPLOYEE"
 
 _INSECURE_JWT_SECRETS = {
     "your-secret-key-change-in-production",

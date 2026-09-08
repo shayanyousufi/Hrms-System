@@ -11,10 +11,12 @@ from sqlalchemy import select, func, or_, desc, asc, text
 import base64
 
 from app.core.database import get_db
-from app.core.deps import get_current_user
+from app.core.deps import get_current_user, require_roles, get_current_employee
+from app.core.config import UserRole
 from app.models.employee import (
     Employee, Attendance, LeaveRecord, EmployeeDocument, ActivityLog, Task, Meeting
 )
+from app.models.user import User
 from app.schemas.employee import (
     EmployeeCreate, EmployeeUpdate, EmployeeResponse, EmployeeListResponse,
     PaginatedEmployees, AttendanceResponse, LeaveResponse, LeaveResponseWithEmployee,
@@ -24,6 +26,59 @@ from app.schemas.employee import (
 )
 
 router = APIRouter(prefix="/api/employees", tags=["employees"], dependencies=[Depends(get_current_user)])
+
+
+def _manage_roles_only(current_user) -> bool:
+    """True when the user manages employees (HR/Super Admin), not self-scoped."""
+    return current_user.role in (UserRole.SUPER_ADMIN.value, UserRole.HR.value)
+
+
+def _is_self_or_staff(employee: Employee, current_user) -> bool:
+    """True when the current EMPLOYEE is viewing their own record."""
+    return (
+        current_user.role == UserRole.EMPLOYEE.value
+        and employee.user_id is not None
+        and employee.user_id == current_user.id
+    )
+
+
+def _is_team_member(employee: Employee, manager_id: int) -> bool:
+    """True when the employee reports to the given manager."""
+    return employee.manager_id is not None and employee.manager_id == manager_id
+
+
+async def _ensure_employee_access(db: AsyncSession, employee: Employee, current_user: User) -> None:
+    """Raise 403 unless the current user may read this employee's records.
+
+    - HR / Super Admin: allowed.
+    - MANAGER: allowed only for their direct reports.
+    - EMPLOYEE: allowed only for their own linked profile.
+    """
+    if _manage_roles_only(current_user):
+        return
+    if current_user.role == UserRole.MANAGER.value:
+        my_employee = (await db.execute(
+            select(Employee).where(Employee.user_id == current_user.id)
+        )).scalar_one_or_none()
+        if not my_employee or not _is_team_member(employee, my_employee.id):
+            raise HTTPException(status_code=403, detail="You can only access your direct reports' records")
+        return
+    if not _is_self_or_staff(employee, current_user):
+        raise HTTPException(status_code=403, detail="You can only access your own records")
+
+
+async def _require_approve_rights(db: AsyncSession, employee: Employee, current_user: User) -> None:
+    """Leave approve/reject rights: HR, Super Admin, or the direct manager."""
+    if current_user.role in (UserRole.SUPER_ADMIN.value, UserRole.HR.value):
+        return
+    if current_user.role == UserRole.MANAGER.value:
+        my_employee = (await db.execute(
+            select(Employee).where(Employee.user_id == current_user.id)
+        )).scalar_one_or_none()
+        if not my_employee or not _is_team_member(employee, my_employee.id):
+            raise HTTPException(status_code=403, detail="You can only approve your direct reports' leave")
+        return
+    raise HTTPException(status_code=403, detail="You do not have permission to approve leave")
 
 
 def generate_employee_id():
@@ -43,9 +98,20 @@ async def list_employees(
     date_from: str = Query("", description="Filter from date (YYYY-MM-DD)"),
     date_to: str = Query("", description="Filter to date (YYYY-MM-DD)"),
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.HR, UserRole.MANAGER)),
 ):
     query = select(Employee)
     count_query = select(func.count(Employee.id))
+
+    # Managers only see their direct reports — never all employees.
+    if current_user.role == UserRole.MANAGER.value:
+        my_employee = (await db.execute(
+            select(Employee).where(Employee.user_id == current_user.id)
+        )).scalar_one_or_none()
+        if my_employee is None:
+            return _empty_employee_list(page, per_page)
+        query = query.where(Employee.manager_id == my_employee.id)
+        count_query = count_query.where(Employee.manager_id == my_employee.id)
 
     if search:
         search_filter = or_(
@@ -105,6 +171,12 @@ async def list_employees(
     )
 
 
+def _empty_employee_list(page: int, per_page: int) -> PaginatedEmployees:
+    return PaginatedEmployees(
+        total=0, page=page, per_page=per_page, total_pages=0, employees=[]
+    )
+
+
 @router.get("/departments")
 async def list_departments(db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Employee.department).distinct())
@@ -112,37 +184,72 @@ async def list_departments(db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/stats/overview")
-async def get_stats(db: AsyncSession = Depends(get_db)):
+async def get_stats(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.HR, UserRole.MANAGER)),
+):
     from datetime import date as date_type
 
-    total_result = await db.execute(select(func.count(Employee.id)))
+    # Manager sees team-scoped overview only.
+    manager_ids = None
+    if current_user.role == UserRole.MANAGER.value:
+        my_employee = (await db.execute(
+            select(Employee).where(Employee.user_id == current_user.id)
+        )).scalar_one_or_none()
+        if my_employee is not None:
+            team = (await db.execute(
+                select(Employee.id).where(Employee.manager_id == my_employee.id)
+            )).scalars().all()
+            manager_ids = list(team)
+        else:
+            manager_ids = []
+
+    total_query = select(func.count(Employee.id))
+    if manager_ids is not None:
+        total_query = total_query.where(Employee.id.in_(manager_ids))
+
+    total_result = await db.execute(total_query)
     total = total_result.scalar() or 0
 
-    status_result = await db.execute(
-        select(Employee.employment_status, func.count(Employee.id)).group_by(Employee.employment_status)
-    )
+    status_query = select(Employee.employment_status, func.count(Employee.id))
+    if manager_ids is not None:
+        status_query = status_query.where(Employee.id.in_(manager_ids))
+    status_result = await db.execute(status_query.group_by(Employee.employment_status))
     status_counts = {row[0]: row[1] for row in status_result.all()}
 
-    dept_result = await db.execute(
-        select(Employee.department, func.count(Employee.id)).group_by(Employee.department)
-    )
+    dept_query = select(Employee.department, func.count(Employee.id))
+    if manager_ids is not None:
+        dept_query = dept_query.where(Employee.id.in_(manager_ids))
+    dept_result = await db.execute(dept_query.group_by(Employee.department))
     departments = [{"name": row[0], "count": row[1]} for row in dept_result.all()]
 
     today = date_type.today()
-    att_result = await db.execute(
-        select(Attendance.status, func.count(Attendance.id)).where(Attendance.date == today).group_by(Attendance.status)
+    att_query = (
+        select(Attendance.status, func.count(Attendance.id))
+        .where(Attendance.date == today)
     )
+    if manager_ids is not None:
+        att_query = att_query.where(Attendance.employee_id.in_(select(Employee.id).where(
+            Employee.id.in_(manager_ids) if manager_ids else False
+        )))
+    att_result = await db.execute(att_query.group_by(Attendance.status))
     attendance_today = {row[0]: row[1] for row in att_result.all()}
     if not attendance_today:
-        att_result = await db.execute(
+        att_query2 = (
             select(Attendance.status, func.count(Attendance.id))
             .where(Attendance.date == today - timedelta(days=1))
-            .group_by(Attendance.status)
         )
-        attendance_today = {row[0]: row[1] for row in att_result.all()}
+        if manager_ids is not None:
+            att_query2 = att_query2.where(Attendance.employee_id.in_(select(Employee.id).where(
+                Employee.id.in_(manager_ids) if manager_ids else False
+            )))
+        att_result2 = await db.execute(att_query2.group_by(Attendance.status))
+        attendance_today = {row[0]: row[1] for row in att_result2.all()}
 
-    leave_result = await db.execute(select(func.count(LeaveRecord.id)).where(LeaveRecord.status == "Pending"))
-    pending_leaves = leave_result.scalar() or 0
+    leave_query = select(func.count(LeaveRecord.id)).where(LeaveRecord.status == "Pending")
+    if manager_ids is not None:
+        leave_query = leave_query.where(LeaveRecord.employee_id.in_(manager_ids))
+    pending_leaves = (await db.execute(leave_query)).scalar() or 0
 
     return {
         "total_employees": total,
@@ -160,16 +267,40 @@ async def get_stats(db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/{employee_id}", response_model=EmployeeResponse)
-async def get_employee(employee_id: str, db: AsyncSession = Depends(get_db)):
+async def get_employee(
+    employee_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     result = await db.execute(select(Employee).where(Employee.employee_id == employee_id))
     employee = result.scalar_one_or_none()
     if not employee:
         raise HTTPException(status_code=404, detail="Employee not found")
+
+    # Permission by role
+    if _manage_roles_only(current_user):
+        # HR / Super Admin: full access
+        pass
+    elif current_user.role == UserRole.MANAGER.value:
+        my_employee = (await db.execute(
+            select(Employee).where(Employee.user_id == current_user.id)
+        )).scalar_one_or_none()
+        if not my_employee or not _is_team_member(employee, my_employee.id):
+            raise HTTPException(status_code=403, detail="You can only view your direct reports")
+    else:
+        # EMPLOYEE: only their own record
+        if not _is_self_or_staff(employee, current_user):
+            raise HTTPException(status_code=403, detail="You can only view your own profile")
+
     return EmployeeResponse.model_validate(employee)
 
 
 @router.post("", response_model=EmployeeResponse, status_code=201)
-async def create_employee(data: EmployeeCreate, db: AsyncSession = Depends(get_db)):
+async def create_employee(
+    data: EmployeeCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.HR)),
+):
     existing_email = await db.execute(select(Employee).where(Employee.email == data.email))
     if existing_email.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="Email already exists")
@@ -194,7 +325,12 @@ async def create_employee(data: EmployeeCreate, db: AsyncSession = Depends(get_d
 
 
 @router.put("/{employee_id}", response_model=EmployeeResponse)
-async def update_employee(employee_id: str, data: EmployeeUpdate, db: AsyncSession = Depends(get_db)):
+async def update_employee(
+    employee_id: str,
+    data: EmployeeUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.HR)),
+):
     result = await db.execute(select(Employee).where(Employee.employee_id == employee_id))
     employee = result.scalar_one_or_none()
     if not employee:
@@ -220,7 +356,19 @@ async def update_employee(employee_id: str, data: EmployeeUpdate, db: AsyncSessi
 
 
 @router.delete("/{employee_id}")
-async def delete_employee(employee_id: str, hard: bool = False, db: AsyncSession = Depends(get_db)):
+async def delete_employee(
+    employee_id: str,
+    hard: bool = False,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.HR)),
+):
+    # Hard delete is SUPER_ADMIN only.
+    if hard and current_user.role != UserRole.SUPER_ADMIN.value:
+        raise HTTPException(
+            status_code=403,
+            detail="Only Super Admin can permanently delete employees",
+        )
+
     result = await db.execute(select(Employee).where(Employee.employee_id == employee_id))
     employee = result.scalar_one_or_none()
     if not employee:
@@ -248,11 +396,14 @@ async def get_attendance(
     page: int = Query(1, ge=1),
     per_page: int = Query(10, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     emp_result = await db.execute(select(Employee).where(Employee.employee_id == employee_id))
     employee = emp_result.scalar_one_or_none()
     if not employee:
         raise HTTPException(status_code=404, detail="Employee not found")
+
+    await _ensure_employee_access(db, employee, current_user)
 
     count_query = select(func.count(Attendance.id)).where(Attendance.employee_id == employee.id)
     total_result = await db.execute(count_query)
@@ -276,7 +427,25 @@ async def get_attendance(
 
 
 @router.post("/attendance/checkin")
-async def check_in(employee_id: int, db: AsyncSession = Depends(get_db)):
+async def check_in(
+    employee_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    employee = await db.get(Employee, employee_id)
+    if not employee:
+        raise HTTPException(status_code=404, detail="Employee not found")
+    # EMPLOYEE can only check themselves in; managers/HR/admin can check-in team/all.
+    if current_user.role == UserRole.EMPLOYEE.value:
+        if not _is_self_or_staff(employee, current_user):
+            raise HTTPException(status_code=403, detail="You can only check yourself in")
+    elif current_user.role == UserRole.MANAGER.value:
+        my_employee = (await db.execute(
+            select(Employee).where(Employee.user_id == current_user.id)
+        )).scalar_one_or_none()
+        if not my_employee or not _is_team_member(employee, my_employee.id):
+            raise HTTPException(status_code=403, detail="You can only check in your direct reports")
+
     today = dt.now().date()
     result = await db.execute(
         select(Attendance).where(Attendance.employee_id == employee_id, Attendance.date == today)
@@ -301,7 +470,24 @@ async def check_in(employee_id: int, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/attendance/checkout")
-async def check_out(employee_id: int, db: AsyncSession = Depends(get_db)):
+async def check_out(
+    employee_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    employee = await db.get(Employee, employee_id)
+    if not employee:
+        raise HTTPException(status_code=404, detail="Employee not found")
+    if current_user.role == UserRole.EMPLOYEE.value:
+        if not _is_self_or_staff(employee, current_user):
+            raise HTTPException(status_code=403, detail="You can only check yourself out")
+    elif current_user.role == UserRole.MANAGER.value:
+        my_employee = (await db.execute(
+            select(Employee).where(Employee.user_id == current_user.id)
+        )).scalar_one_or_none()
+        if not my_employee or not _is_team_member(employee, my_employee.id):
+            raise HTTPException(status_code=403, detail="You can only check out your direct reports")
+
     today = dt.now().date()
     result = await db.execute(
         select(Attendance).where(Attendance.employee_id == employee_id, Attendance.date == today)
@@ -326,7 +512,24 @@ async def check_out(employee_id: int, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/attendance/today/{employee_id}")
-async def get_today_attendance(employee_id: int, db: AsyncSession = Depends(get_db)):
+async def get_today_attendance(
+    employee_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    employee = await db.get(Employee, employee_id)
+    if not employee:
+        raise HTTPException(status_code=404, detail="Employee not found")
+    if current_user.role == UserRole.EMPLOYEE.value:
+        if not _is_self_or_staff(employee, current_user):
+            raise HTTPException(status_code=403, detail="You can only view your own status")
+    elif current_user.role == UserRole.MANAGER.value:
+        my_employee = (await db.execute(
+            select(Employee).where(Employee.user_id == current_user.id)
+        )).scalar_one_or_none()
+        if not my_employee or not _is_team_member(employee, my_employee.id):
+            raise HTTPException(status_code=403, detail="You can only view your direct reports' status")
+
     today = dt.now().date()
     result = await db.execute(
         select(Attendance).where(Attendance.employee_id == employee_id, Attendance.date == today)
@@ -342,11 +545,18 @@ async def get_today_attendance(employee_id: int, db: AsyncSession = Depends(get_
 
 
 @router.put("/{employee_id}/profile-picture")
-async def upload_profile_picture(employee_id: str, file: UploadFile = File(...), db: AsyncSession = Depends(get_db)):
+async def upload_profile_picture(
+    employee_id: str,
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     result = await db.execute(select(Employee).where(Employee.employee_id == employee_id))
     employee = result.scalar_one_or_none()
     if not employee:
         raise HTTPException(status_code=404, detail="Employee not found")
+
+    await _ensure_employee_access(db, employee, current_user)
 
     content = await file.read()
     base64_image = base64.b64encode(content).decode("utf-8")
@@ -365,11 +575,14 @@ async def get_leaves(
     page: int = Query(1, ge=1),
     per_page: int = Query(10, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     emp_result = await db.execute(select(Employee).where(Employee.employee_id == employee_id))
     employee = emp_result.scalar_one_or_none()
     if not employee:
         raise HTTPException(status_code=404, detail="Employee not found")
+
+    await _ensure_employee_access(db, employee, current_user)
 
     count_query = select(func.count(LeaveRecord.id)).where(LeaveRecord.employee_id == employee.id)
     total_result = await db.execute(count_query)
@@ -393,11 +606,17 @@ async def get_leaves(
 
 
 @router.get("/{employee_id}/documents", response_model=list[DocumentResponse])
-async def get_documents(employee_id: str, db: AsyncSession = Depends(get_db)):
+async def get_documents(
+    employee_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     emp_result = await db.execute(select(Employee).where(Employee.employee_id == employee_id))
     employee = emp_result.scalar_one_or_none()
     if not employee:
         raise HTTPException(status_code=404, detail="Employee not found")
+
+    await _ensure_employee_access(db, employee, current_user)
 
     result = await db.execute(
         select(EmployeeDocument).where(EmployeeDocument.employee_id == employee.id)
@@ -411,11 +630,14 @@ async def get_activities(
     page: int = Query(1, ge=1),
     per_page: int = Query(10, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     emp_result = await db.execute(select(Employee).where(Employee.employee_id == employee_id))
     employee = emp_result.scalar_one_or_none()
     if not employee:
         raise HTTPException(status_code=404, detail="Employee not found")
+
+    await _ensure_employee_access(db, employee, current_user)
 
     count_query = select(func.count(ActivityLog.id)).where(ActivityLog.employee_id == employee.id)
     total_result = await db.execute(count_query)
@@ -491,7 +713,19 @@ async def get_meetings(
 
 
 @router.post("/leaves", response_model=LeaveResponse, status_code=201)
-async def create_leave(data: LeaveCreate, db: AsyncSession = Depends(get_db)):
+async def create_leave(
+    data: LeaveCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    # EMPLOYEE may only submit leave for their own linked profile.
+    if current_user.role == UserRole.EMPLOYEE.value:
+        own = (await db.execute(
+            select(Employee).where(Employee.user_id == current_user.id)
+        )).scalar_one_or_none()
+        if not own or own.id != data.employee_id:
+            raise HTTPException(status_code=403, detail="You can only submit leave for yourself")
+
     leave = LeaveRecord(
         employee_id=data.employee_id,
         leave_type=data.leave_type,
@@ -514,11 +748,22 @@ async def create_leave(data: LeaveCreate, db: AsyncSession = Depends(get_db)):
 
 
 @router.put("/leaves/{leave_id}", response_model=LeaveResponse)
-async def update_leave(leave_id: int, data: LeaveUpdate, db: AsyncSession = Depends(get_db)):
+async def update_leave(
+    leave_id: int,
+    data: LeaveUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     result = await db.execute(select(LeaveRecord).where(LeaveRecord.id == leave_id))
     leave = result.scalar_one_or_none()
     if not leave:
         raise HTTPException(status_code=404, detail="Leave record not found")
+
+    employee = await db.get(Employee, leave.employee_id)
+    if not employee:
+        raise HTTPException(status_code=404, detail="Employee not found")
+    # Approve/reject is a staff action: HR, Super Admin, or the direct manager.
+    await _require_approve_rights(db, employee, current_user)
 
     # Revert previously approved leave's deduction before applying a new state.
     if leave.status == "Approved":
@@ -553,9 +798,23 @@ async def get_all_leaves(
     per_page: int = Query(10, ge=1, le=100),
     status_filter: str = Query("", alias="status"),
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.HR, UserRole.MANAGER)),
 ):
     query = select(LeaveRecord)
     count_query = select(func.count(LeaveRecord.id))
+
+    # Manager sees only their direct reports' leave.
+    if current_user.role == UserRole.MANAGER.value:
+        my_employee = (await db.execute(
+            select(Employee).where(Employee.user_id == current_user.id)
+        )).scalar_one_or_none()
+        if my_employee is None:
+            return PaginatedLeaves(total=0, page=page, per_page=per_page, total_pages=0, records=[])
+        team_ids = (await db.execute(
+            select(Employee.id).where(Employee.manager_id == my_employee.id)
+        )).scalars().all()
+        query = query.where(LeaveRecord.employee_id.in_(team_ids))
+        count_query = count_query.where(LeaveRecord.employee_id.in_(team_ids))
 
     if status_filter:
         query = query.where(LeaveRecord.status == status_filter)
@@ -597,7 +856,10 @@ def _leave_days(leave: LeaveRecord) -> int:
 
 
 @router.get("/export/employees.csv")
-async def export_employees_csv(db: AsyncSession = Depends(get_db)):
+async def export_employees_csv(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.HR)),
+):
     result = await db.execute(select(Employee).order_by(Employee.id))
     employees = result.scalars().all()
 
@@ -630,8 +892,23 @@ async def export_attendance_csv(
     date_to: str = Query("", description="YYYY-MM-DD"),
     status_filter: str = Query("", alias="status"),
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.HR, UserRole.MANAGER)),
 ):
     query = select(Attendance, Employee).join(Employee, Attendance.employee_id == Employee.id)
+
+    # Manager exports only their team's attendance.
+    if current_user.role == UserRole.MANAGER.value:
+        my_employee = (await db.execute(
+            select(Employee).where(Employee.user_id == current_user.id)
+        )).scalar_one_or_none()
+        if my_employee is None:
+            query = query.where(False)
+        else:
+            team_ids = (await db.execute(
+                select(Employee.id).where(Employee.manager_id == my_employee.id)
+            )).scalars().all()
+            query = query.where(Attendance.employee_id.in_(team_ids))
+
     if date_from:
         query = query.where(Attendance.date >= dt.strptime(date_from, "%Y-%m-%d").date())
     if date_to:
@@ -661,8 +938,26 @@ async def export_attendance_csv(
 
 
 @router.get("/export/leaves.csv")
-async def export_leaves_csv(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(LeaveRecord).order_by(LeaveRecord.id.desc()))
+async def export_leaves_csv(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.HR, UserRole.MANAGER)),
+):
+    q = select(LeaveRecord)
+
+    # Manager exports only their team's leave.
+    if current_user.role == UserRole.MANAGER.value:
+        my_employee = (await db.execute(
+            select(Employee).where(Employee.user_id == current_user.id)
+        )).scalar_one_or_none()
+        if my_employee is None:
+            q = q.where(False)
+        else:
+            team_ids = (await db.execute(
+                select(Employee.id).where(Employee.manager_id == my_employee.id)
+            )).scalars().all()
+            q = q.where(LeaveRecord.employee_id.in_(team_ids))
+
+    result = await db.execute(q.order_by(LeaveRecord.id.desc()))
     leaves = result.scalars().all()
 
     output = io.StringIO()

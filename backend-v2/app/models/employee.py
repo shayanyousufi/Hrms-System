@@ -1,6 +1,6 @@
 from datetime import datetime, date
 from sqlalchemy import Integer, String, DateTime, Date, Numeric, Text, ForeignKey, func
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
 
@@ -10,6 +10,8 @@ class Employee(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     employee_id: Mapped[str] = mapped_column(String(20), unique=True, nullable=False, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=True, unique=True)
+    manager_id: Mapped[int] = mapped_column(ForeignKey("employees.id"), nullable=True)
     first_name: Mapped[str] = mapped_column(String(100), nullable=False)
     last_name: Mapped[str] = mapped_column(String(100), nullable=False)
     email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
@@ -36,6 +38,10 @@ class Employee(Base):
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    user = relationship("User", back_populates="employee")
+    manager = relationship("Employee", remote_side=[id], back_populates="reports")
+    reports = relationship("Employee", back_populates="manager")
 
 
 class Attendance(Base):

@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback } from "react";
 import Link from "next/link";
 import DashboardLayout from "@/components/DashboardLayout";
 import { employeesApi, DashboardStats, EmployeeListItem, TaskRecord, MeetingRecord, PaginatedTasks, PaginatedMeetings, PaginatedResponse, ActivityFeedItem } from "@/lib/employeeApi";
+import { isStaffRole } from "@/lib/auth";
 
 const barShades = ["bg-primary-500", "bg-primary-300", "bg-primary-400", "bg-primary-500", "bg-primary-300", "bg-primary-400", "bg-primary-500"];
 
@@ -28,6 +29,7 @@ const badgeStyles: Record<string, string> = {
 };
 
 export default function DashboardPage() {
+  const [role, setRole] = useState<string | null>(null);
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [recentData, setRecentData] = useState<PaginatedResponse | null>(null);
   const [recentPage, setRecentPage] = useState(1);
@@ -45,14 +47,23 @@ export default function DashboardPage() {
   const [activity, setActivity] = useState<ActivityFeedItem[]>([]);
 
   useEffect(() => {
+    const stored = localStorage.getItem("role");
+    if (stored) setRole(stored);
+  }, []);
+
+  const isStaff = isStaffRole(role);
+
+  useEffect(() => {
     async function load() {
       try {
-        const s = await employeesApi.stats();
-        setStats(s);
         const me = await employeesApi.getMyAttendanceStatus();
         setSelectedEmpId(me.id);
         setMyName(me.full_name);
         setTodayStatus({ checked_in: me.checked_in, check_in: me.check_in, check_out: me.check_out });
+        if (isStaff) {
+          const s = await employeesApi.stats();
+          setStats(s);
+        }
       } catch (e) {
         console.error(e);
       } finally {
@@ -60,9 +71,10 @@ export default function DashboardPage() {
       }
     }
     load();
-  }, []);
+  }, [isStaff]);
 
   useEffect(() => {
+    if (!isStaff) return;
     let cancelled = false;
     const loadActivity = async () => {
       try {
@@ -78,15 +90,16 @@ export default function DashboardPage() {
       cancelled = true;
       clearInterval(interval);
     };
-  }, []);
+  }, [isStaff]);
 
   const fetchRecent = useCallback(async (page: number) => {
+    if (!isStaff) return;
     try {
       const params = new URLSearchParams({ page: page.toString(), per_page: "3", sort_by: "id", sort_order: "desc" });
       const data = await employeesApi.list(params);
       setRecentData(data);
     } catch (e) { console.error(e); }
-  }, []);
+  }, [isStaff]);
 
   const fetchTasks = useCallback(async (page: number) => {
     try {
@@ -190,7 +203,8 @@ export default function DashboardPage() {
         </div>
       ) : (
         <>
-          {/* ===== Row 1: Stat cards ===== */}
+          {/* ===== Row 1: Stat cards (staff view) ===== */}
+          {isStaff && (
           <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 mb-4">
             <div className="bg-gradient-to-br from-primary-400 via-primary-500 to-primary-600 rounded-[18px] p-5 text-white shadow-lg shadow-primary-200">
               <p className="text-xs font-medium text-primary-100">Total Employees</p>
@@ -209,14 +223,16 @@ export default function DashboardPage() {
             <WhiteStatCard label="On Leave" value={stats?.on_leave ?? 0} badge={`${stats?.pending_leaves ?? 0} pending requests`} icon="M12 3v1m0 16v1m9-9h-1M4 12H3m15.36 6.36l-.7-.7m-12.72 0l-.7.7m12.72-12.72l-.7.7m-12.72 0l-.7-.7M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
             <WhiteStatCard label="Departments" value={stats?.departments.length ?? 0} badge="Across company" icon="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
           </div>
+          )}
 
           {/* ===== Row 2 ===== */}
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-4">
-            {/* Bar chart card */}
+            {/* Bar chart card (staff view) */}
+            {isStaff && stats && (
             <div className="bg-white rounded-[18px] p-5">
               <h3 className="text-[13px] font-bold text-gray-900">Employees by Department</h3>
               <div className="flex items-end justify-between gap-1.5 h-[150px] mt-5 px-1">
-                {stats?.departments.map((d, i) => {
+                {stats.departments.map((d, i) => {
                   const max = Math.max(...stats.departments.map((x) => x.count));
                   const h = Math.max(18, (d.count / max) * 100);
                   return (
@@ -233,6 +249,7 @@ export default function DashboardPage() {
                 })}
               </div>
             </div>
+            )}
 
             {/* Meeting card - server-side paginated */}
             <div className="bg-gradient-to-br from-primary-500 via-primary-500 to-primary-600 rounded-[18px] p-5 flex flex-col text-white shadow-lg shadow-primary-200">
@@ -312,7 +329,8 @@ export default function DashboardPage() {
 
           {/* ===== Row 3 ===== */}
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-            {/* Recently joined - server-side paginated */}
+            {/* Recently joined - server-side paginated (staff view) */}
+            {isStaff && (
             <div className="bg-white rounded-[18px] p-5">
               <div className="flex items-center justify-between mb-2">
                 <h3 className="text-[13px] font-bold text-gray-900">Recently Joined</h3>
@@ -347,8 +365,10 @@ export default function DashboardPage() {
                 </div>
               )}
             </div>
+            )}
 
-            {/* Attendance donut */}
+            {/* Attendance donut (staff view) */}
+            {isStaff && (
             <div className="bg-white rounded-[18px] p-5">
               <h3 className="text-[13px] font-bold text-gray-900 mb-4">Attendance Overview</h3>
               <div className="flex flex-col items-center">
@@ -371,6 +391,7 @@ export default function DashboardPage() {
                 </div>
               </div>
             </div>
+            )}
 
             {/* Clock + Check-in/out card */}
             <div className="bg-[#1D1D2B] rounded-[18px] p-5 text-white flex flex-col">
@@ -419,7 +440,8 @@ export default function DashboardPage() {
             </div>
           </div>
 
-          {/* ===== Recent activity feed ===== */}
+          {/* ===== Recent activity feed (staff view) ===== */}
+          {isStaff && (
           <div className="bg-white rounded-[18px] p-5 mt-4">
             <div className="flex items-center gap-2 mb-3">
               <h3 className="text-[13px] font-bold text-gray-900">Recent Activity</h3>
@@ -454,6 +476,7 @@ export default function DashboardPage() {
               </div>
             )}
           </div>
+          )}
         </>
       )}
     </DashboardLayout>

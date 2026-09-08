@@ -2,9 +2,7 @@ from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
-from app.core.database import engine, Base
 from app.core.deps import get_current_user
-from app.core.migrations import apply_patch_migrations
 from app.routes.auth import router as auth_router
 from app.routes.employees import router as employees_router
 from app.routes.attendance import router as attendance_router
@@ -26,10 +24,24 @@ app.include_router(attendance_router)
 
 @app.on_event("startup")
 async def startup():
-    from app.models.employee import Employee, Attendance, LeaveRecord, EmployeeDocument, ActivityLog, Task, Meeting
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    await apply_patch_migrations()
+    # Run all Alembic migrations to bring the schema up to date.
+    # env.py uses asyncio.run() internally, so it must run on a worker thread
+    # (never on the running event loop).
+    import asyncio
+
+    def _run_migrations() -> None:
+        from alembic import command
+        from alembic.config import Config
+
+        cfg = Config("alembic.ini")
+        cfg.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
+        command.upgrade(cfg, "head")
+
+    try:
+        await asyncio.wait_for(asyncio.to_thread(_run_migrations), timeout=60)
+    except Exception as exc:  # pragma: no cover - startup diagnostics
+        import logging
+        logging.getLogger("uvicorn.error").error(f"Startup migration failed: {exc}")
 
 
 @app.get("/", dependencies=[Depends(get_current_user)])

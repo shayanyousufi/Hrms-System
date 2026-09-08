@@ -4,6 +4,7 @@ import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { authApi } from "@/lib/api";
+import { saveSession } from "@/lib/auth";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -21,9 +22,8 @@ export default function LoginPage() {
 
     try {
       const response = await authApi.login({ email, password });
-      const token = response.data.access_token;
-      localStorage.setItem("token", token);
-      document.cookie = `token=${token}; path=/; max-age=86400`;
+      const { access_token, user } = response.data;
+      saveSession(access_token, user.role);
       setShowWelcome(true);
       setTimeout(() => {
         router.push("/dashboard");
