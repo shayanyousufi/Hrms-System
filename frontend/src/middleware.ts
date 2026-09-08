@@ -3,7 +3,7 @@ import type { NextRequest } from "next/server";
 
 const adminRoutes = ["/users"];
 const staffRoutes = ["/employees", "/attendance", "/leaves"];
-const protectedRoutes = ["/dashboard", ...staffRoutes, ...adminRoutes];
+const protectedRoutes = ["/dashboard", ...staffRoutes, ...adminRoutes, "/reports"];
 const authRoutes = ["/login", "/register", "/"];
 
 const STAFF_ROLES = ["SUPER_ADMIN", "HR", "MANAGER"];
@@ -52,6 +52,7 @@ export const config = {
     "/attendance/:path*",
     "/leaves/:path*",
     "/users/:path*",
+    "/reports/:path*",
     "/login",
     "/register",
     "/",

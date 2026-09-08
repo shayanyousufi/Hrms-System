@@ -179,7 +179,7 @@ export default function DashboardPage() {
   };
 
   const attendanceTotal = stats
-    ? stats.attendance_today.present + stats.attendance_today.absent + stats.attendance_today.leave
+    ? stats.attendance_today.present + stats.attendance_today.absent + stats.attendance_today.leave + stats.attendance_today.late
     : 0;
   const attendancePct = attendanceTotal ? Math.round((stats!.attendance_today.present / attendanceTotal) * 100) : 0;
 
@@ -205,7 +205,7 @@ export default function DashboardPage() {
         <>
           {/* ===== Row 1: Stat cards (staff view) ===== */}
           {isStaff && (
-          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 mb-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-4 mb-4">
             <div className="bg-gradient-to-br from-primary-400 via-primary-500 to-primary-600 rounded-[18px] p-5 text-white shadow-lg shadow-primary-200">
               <p className="text-xs font-medium text-primary-100">Total Employees</p>
               <p className="text-[32px] font-bold mt-1.5 leading-none">{stats?.total_employees}</p>
@@ -220,6 +220,7 @@ export default function DashboardPage() {
             </div>
 
             <WhiteStatCard label="Present Today" value={stats?.attendance_today.present ?? 0} badge={`${attendancePct}% attendance`} icon="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+            <WhiteStatCard label="Late Today" value={stats?.attendance_today.late ?? 0} badge="Checked in late" icon="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
             <WhiteStatCard label="On Leave" value={stats?.on_leave ?? 0} badge={`${stats?.pending_leaves ?? 0} pending requests`} icon="M12 3v1m0 16v1m9-9h-1M4 12H3m15.36 6.36l-.7-.7m-12.72 0l-.7.7m12.72-12.72l-.7.7m-12.72 0l-.7-.7M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
             <WhiteStatCard label="Departments" value={stats?.departments.length ?? 0} badge="Across company" icon="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
           </div>

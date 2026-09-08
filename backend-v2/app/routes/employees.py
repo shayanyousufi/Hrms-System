@@ -3,9 +3,10 @@ import random
 import string
 import csv
 import io
-from datetime import timedelta, datetime as dt
+import uuid
+from datetime import timedelta, datetime as dt, date as date_type
 from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, or_, desc, asc, text
 import base64
@@ -13,6 +14,9 @@ import base64
 from app.core.database import get_db
 from app.core.deps import get_current_user, require_roles, get_current_employee
 from app.core.config import UserRole
+from app.core.storage import (
+    save_document, resolve_stored_path, delete_document,
+)
 from app.models.employee import (
     Employee, Attendance, LeaveRecord, EmployeeDocument, ActivityLog, Task, Meeting
 )
@@ -262,6 +266,7 @@ async def get_stats(
             "present": attendance_today.get("Present", 0),
             "absent": attendance_today.get("Absent", 0),
             "leave": attendance_today.get("Leave", 0),
+            "late": attendance_today.get("Late", 0),
         },
     }
 
@@ -605,6 +610,44 @@ async def get_leaves(
     )
 
 
+def _document_response(doc: EmployeeDocument, uploader: User | None = None) -> DocumentResponse:
+    return DocumentResponse(
+        id=doc.id,
+        employee_id=doc.employee_id,
+        name=doc.name,
+        doc_type=doc.doc_type,
+        has_file=bool(doc.stored_filename),
+        content_type=doc.content_type,
+        file_size=doc.file_size,
+        uploaded_at=doc.uploaded_at,
+        uploaded_by=doc.uploaded_by,
+        uploaded_by_name=uploader.email if uploader else None,
+    )
+
+
+async def _get_document_with_access(
+    db: AsyncSession, employee_id: str, document_id: int, current_user: User
+) -> tuple[Employee, EmployeeDocument]:
+    """Resolve the employee + document, enforcing RBAC + ownership."""
+    emp_result = await db.execute(select(Employee).where(Employee.employee_id == employee_id))
+    employee = emp_result.scalar_one_or_none()
+    if not employee:
+        raise HTTPException(status_code=404, detail="Employee not found")
+
+    await _ensure_employee_access(db, employee, current_user)
+
+    doc_result = await db.execute(
+        select(EmployeeDocument).where(
+            EmployeeDocument.id == document_id,
+            EmployeeDocument.employee_id == employee.id,
+        )
+    )
+    doc = doc_result.scalar_one_or_none()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return employee, doc
+
+
 @router.get("/{employee_id}/documents", response_model=list[DocumentResponse])
 async def get_documents(
     employee_id: str,
@@ -619,9 +662,130 @@ async def get_documents(
     await _ensure_employee_access(db, employee, current_user)
 
     result = await db.execute(
-        select(EmployeeDocument).where(EmployeeDocument.employee_id == employee.id)
+        select(EmployeeDocument)
+        .where(EmployeeDocument.employee_id == employee.id)
+        .order_by(desc(EmployeeDocument.id))
     )
-    return [DocumentResponse.model_validate(d) for d in result.scalars().all()]
+    docs = result.scalars().all()
+
+    uploader_ids = {d.uploaded_by for d in docs if d.uploaded_by}
+    uploaders = {}
+    if uploader_ids:
+        user_rows = await db.execute(select(User).where(User.id.in_(uploader_ids)))
+        uploaders = {u.id: u for u in user_rows.scalars().all()}
+
+    return [_document_response(d, uploaders.get(d.uploaded_by)) for d in docs]
+
+
+@router.post("/{employee_id}/documents", response_model=DocumentResponse, status_code=201)
+async def upload_document(
+    employee_id: str,
+    file: UploadFile = File(...),
+    doc_type: str = Query("General", description="Free-form document category"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    emp_result = await db.execute(select(Employee).where(Employee.employee_id == employee_id))
+    employee = emp_result.scalar_one_or_none()
+    if not employee:
+        raise HTTPException(status_code=404, detail="Employee not found")
+
+    await _ensure_employee_access(db, employee, current_user)
+
+    original_name = (file.filename or "document").strip()
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Empty file")
+
+    stored = save_document(employee.id, original_name, content)
+
+    from pathlib import Path as _P
+    safe_name = _P(original_name).name[:200] or "document"
+
+    doc = EmployeeDocument(
+        employee_id=employee.id,
+        name=safe_name,
+        doc_type=(doc_type or "General").strip()[:50] or "General",
+        stored_filename=stored,
+        content_type=file.content_type,
+        file_size=len(content),
+        uploaded_by=current_user.id,
+    )
+    db.add(doc)
+    await db.commit()
+    await db.refresh(doc)
+
+    log = ActivityLog(
+        employee_id=employee.id,
+        action=f"Document uploaded: {safe_name}",
+        performed_by=current_user.email,
+    )
+    db.add(log)
+    await db.commit()
+
+    return _document_response(doc, current_user)
+
+
+@router.get("/{employee_id}/documents/{document_id}/download")
+async def download_document(
+    employee_id: str,
+    document_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    _, doc = await _get_document_with_access(db, employee_id, document_id, current_user)
+
+    if not doc.stored_filename:
+        raise HTTPException(status_code=404, detail="No file attached to this document")
+
+    path = resolve_stored_path(doc.stored_filename)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="File not found on disk")
+
+    content_type = doc.content_type or "application/octet-stream"
+    filename = doc.name or f"document-{doc.id}"
+    disposition = f'attachment; filename="{_ascii_fallback(filename)}"'
+
+    return StreamingResponse(
+        _iter_file(path),
+        media_type=content_type,
+        headers={"Content-Disposition": disposition},
+    )
+
+
+def _iter_file(path):
+    with open(path, "rb") as f:
+        while chunk := f.read(64 * 1024):
+            yield chunk
+
+
+def _ascii_fallback(name: str) -> str:
+    """Content-Disposition ASCII placeholder for non-latin characters."""
+    encoded = name.encode("ascii", "ignore").decode()
+    return encoded or "document"
+
+
+@router.delete("/{employee_id}/documents/{document_id}", status_code=200)
+async def delete_document_endpoint(
+    employee_id: str,
+    document_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    employee, doc = await _get_document_with_access(db, employee_id, document_id, current_user)
+
+    delete_document(doc.stored_filename)
+    await db.delete(doc)
+
+    log = ActivityLog(
+        employee_id=employee.id,
+        action=f"Document deleted: {doc.name}",
+        performed_by=current_user.email,
+    )
+    db.add(log)
+    await db.commit()
+
+    return {"message": "Document deleted"}
 
 
 @router.get("/{employee_id}/activities", response_model=PaginatedActivities)
@@ -855,12 +1019,42 @@ def _leave_days(leave: LeaveRecord) -> int:
     return max(1, days)
 
 
+def _parse_csv_dates(date_from: str, date_to: str) -> tuple:
+    try:
+        df = date_type.fromisoformat(date_from) if date_from else None
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date_from, use YYYY-MM-DD")
+    try:
+        dt_val = date_type.fromisoformat(date_to) if date_to else None
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date_to, use YYYY-MM-DD")
+    if df and dt_val and df > dt_val:
+        raise HTTPException(status_code=400, detail="date_from cannot be after date_to")
+    return df, dt_val
+
+
 @router.get("/export/employees.csv")
 async def export_employees_csv(
+    department: str = Query(""),
+    status_filter: str = Query("", alias="status"),
+    date_from: str = Query("", description="Joining date from (YYYY-MM-DD)"),
+    date_to: str = Query("", description="Joining date to (YYYY-MM-DD)"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.HR)),
 ):
-    result = await db.execute(select(Employee).order_by(Employee.id))
+    df, dt_val = _parse_csv_dates(date_from, date_to)
+
+    query = select(Employee)
+    if department:
+        query = query.where(Employee.department == department)
+    if status_filter:
+        query = query.where(Employee.employment_status == status_filter)
+    if df:
+        query = query.where(Employee.joining_date >= df)
+    if dt_val:
+        query = query.where(Employee.joining_date <= dt_val)
+
+    result = await db.execute(query.order_by(Employee.id))
     employees = result.scalars().all()
 
     output = io.StringIO()
@@ -891,9 +1085,13 @@ async def export_attendance_csv(
     date_from: str = Query("", description="YYYY-MM-DD"),
     date_to: str = Query("", description="YYYY-MM-DD"),
     status_filter: str = Query("", alias="status"),
+    employee: str = Query("", description="employee_id filter"),
+    department: str = Query(""),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.HR, UserRole.MANAGER)),
 ):
+    df, dt_val = _parse_csv_dates(date_from, date_to)
+
     query = select(Attendance, Employee).join(Employee, Attendance.employee_id == Employee.id)
 
     # Manager exports only their team's attendance.
@@ -909,12 +1107,22 @@ async def export_attendance_csv(
             )).scalars().all()
             query = query.where(Attendance.employee_id.in_(team_ids))
 
-    if date_from:
-        query = query.where(Attendance.date >= dt.strptime(date_from, "%Y-%m-%d").date())
-    if date_to:
-        query = query.where(Attendance.date <= dt.strptime(date_to, "%Y-%m-%d").date())
+    if df:
+        query = query.where(Attendance.date >= df)
+    if dt_val:
+        query = query.where(Attendance.date <= dt_val)
     if status_filter:
         query = query.where(Attendance.status == status_filter)
+    if employee:
+        emp = (await db.execute(
+            select(Employee).where(Employee.employee_id == employee)
+        )).scalar_one_or_none()
+        if emp is None:
+            return Response(content="\ufeffEmployee ID not found", media_type="text/csv; charset=utf-8",
+                            headers={"Content-Disposition": "attachment; filename=attendance.csv"})
+        query = query.where(Attendance.employee_id == emp.id)
+    if department:
+        query = query.where(Employee.department == department)
     result = await db.execute(query.order_by(Attendance.date.desc()))
     rows = result.all()
 
@@ -939,10 +1147,19 @@ async def export_attendance_csv(
 
 @router.get("/export/leaves.csv")
 async def export_leaves_csv(
+    date_from: str = Query("", description="YYYY-MM-DD"),
+    date_to: str = Query("", description="YYYY-MM-DD"),
+    status_filter: str = Query("", alias="status", description="PENDING | APPROVED | REJECTED"),
+    employee: str = Query("", description="employee_id filter"),
+    department: str = Query(""),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.HR, UserRole.MANAGER)),
 ):
-    q = select(LeaveRecord)
+    df, dt_val = _parse_csv_dates(date_from, date_to)
+    if status_filter and status_filter.upper() not in ("PENDING", "APPROVED", "REJECTED"):
+        raise HTTPException(status_code=400, detail="Invalid leave status filter")
+
+    q = select(LeaveRecord, Employee).join(Employee, LeaveRecord.employee_id == Employee.id)
 
     # Manager exports only their team's leave.
     if current_user.role == UserRole.MANAGER.value:
@@ -957,8 +1174,25 @@ async def export_leaves_csv(
             )).scalars().all()
             q = q.where(LeaveRecord.employee_id.in_(team_ids))
 
+    if df:
+        q = q.where(LeaveRecord.start_date >= df)
+    if dt_val:
+        q = q.where(LeaveRecord.end_date <= dt_val)
+    if status_filter:
+        q = q.where(func.upper(LeaveRecord.status) == status_filter.upper())
+    if employee:
+        emp = (await db.execute(
+            select(Employee).where(Employee.employee_id == employee)
+        )).scalar_one_or_none()
+        if emp is None:
+            return Response(content="\ufeffEmployee ID not found", media_type="text/csv; charset=utf-8",
+                            headers={"Content-Disposition": "attachment; filename=leaves.csv"})
+        q = q.where(LeaveRecord.employee_id == emp.id)
+    if department:
+        q = q.where(Employee.department == department)
+
     result = await db.execute(q.order_by(LeaveRecord.id.desc()))
-    leaves = result.scalars().all()
+    leaves = result.all()
 
     output = io.StringIO()
     writer = csv.writer(output)
@@ -966,8 +1200,7 @@ async def export_leaves_csv(
         "ID", "Employee ID", "Leave Type", "Start Date",
         "End Date", "Status", "Reason",
     ])
-    for l in leaves:
-        emp = await db.get(Employee, l.employee_id)
+    for l, emp in leaves:
         writer.writerow([
             l.id, emp.employee_id if emp else l.employee_id, l.leave_type,
             l.start_date.isoformat(), l.end_date.isoformat(), l.status, l.reason or "",

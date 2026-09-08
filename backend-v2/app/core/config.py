@@ -35,6 +35,9 @@ class Settings:
     SMTP_USER: str = os.getenv("SMTP_USER", "")
     SMTP_PASSWORD: str = os.getenv("SMTP_PASSWORD", "")
 
+    # Local protected upload directory for employee documents (not in public webroot).
+    UPLOAD_DIR: str = os.getenv("UPLOAD_DIR", "./uploads")
+
     def validate(self) -> None:
         secret = (self.JWT_SECRET_KEY or "").strip()
         if not secret:

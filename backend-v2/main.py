@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Depends
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
@@ -6,6 +7,8 @@ from app.core.deps import get_current_user
 from app.routes.auth import router as auth_router
 from app.routes.employees import router as employees_router
 from app.routes.attendance import router as attendance_router
+from app.routes.reports import router as reports_router
+from app.routes.imports import router as imports_router
 
 app = FastAPI(title="Tech Land HRMS API", version="1.0.0")
 
@@ -20,6 +23,8 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(employees_router)
 app.include_router(attendance_router)
+app.include_router(reports_router)
+app.include_router(imports_router)
 
 
 @app.on_event("startup")
@@ -42,6 +47,17 @@ async def startup():
     except Exception as exc:  # pragma: no cover - startup diagnostics
         import logging
         logging.getLogger("uvicorn.error").error(f"Startup migration failed: {exc}")
+
+
+@app.exception_handler(Exception)
+async def _global_exc_handler(request, exc):
+    import traceback, os, datetime
+    logdir = r"C:\Users\Moon\AppData\Local\Temp\opencode"
+    os.makedirs(logdir, exist_ok=True)
+    with open(os.path.join(logdir, "exc_trace.log"), "a", encoding="utf-8") as f:
+        f.write(f"\n===== {datetime.datetime.now()} path={request.url.path}\n")
+        f.write(traceback.format_exc())
+    return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
 
 
 @app.get("/", dependencies=[Depends(get_current_user)])
