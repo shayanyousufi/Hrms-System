@@ -8,6 +8,12 @@ backend-v2/.env
 # Frontend
 frontend/node_modules/
 frontend/.next/
+frontend/.env.local
+
+# Environment files (keep .env.example)
+.env
+.env.*
+!.env.example
 
 # OS
 .DS_Store

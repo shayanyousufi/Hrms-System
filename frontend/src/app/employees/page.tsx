@@ -5,6 +5,8 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import DashboardLayout from "@/components/DashboardLayout";
 import { employeesApi, PaginatedResponse, downloadCsv } from "@/lib/employeeApi";
+import { importApi, ImportPreview, ImportConfirm } from "@/lib/importApi";
+import { canManageEmployees } from "@/lib/auth";
 
 const departments = ["Engineering", "Design", "HR", "Finance", "Marketing", "Sales"];
 const statuses = ["Active", "On Leave", "Inactive"];
@@ -35,6 +37,7 @@ export default function EmployeesPage() {
 function EmployeesContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const [isAdmin, setIsAdmin] = useState(false);
   const [data, setData] = useState<PaginatedResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState(searchParams.get("search") || "");
@@ -46,6 +49,12 @@ function EmployeesContent() {
   const [sortBy, setSortBy] = useState("id");
   const [sortOrder, setSortOrder] = useState("desc");
   const [showFilters, setShowFilters] = useState(false);
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [importPreview, setImportPreview] = useState<ImportPreview | null>(null);
+  const [importResult, setImportResult] = useState<ImportConfirm | null>(null);
+  const [importBusy, setImportBusy] = useState(false);
+  const [importError, setImportError] = useState("");
   const perPage = 10;
 
   const fetchEmployees = useCallback(async () => {
@@ -70,6 +79,11 @@ function EmployeesContent() {
       setLoading(false);
     }
   }, [page, search, department, status, sortBy, sortOrder, dateFrom, dateTo]);
+
+  useEffect(() => {
+    const role = localStorage.getItem("role");
+    setIsAdmin(canManageEmployees(role));
+  }, []);
 
   useEffect(() => {
     fetchEmployees();
@@ -97,6 +111,46 @@ function EmployeesContent() {
 
   const activeFilters = (dateFrom ? 1 : 0) + (dateTo ? 1 : 0);
 
+  const handleImportFile = (file: File) => {
+    setImportFile(file);
+    setImportPreview(null);
+    setImportResult(null);
+    setImportError("");
+  };
+
+  const runPreview = async () => {
+    if (!importFile) return;
+    setImportBusy(true);
+    setImportError("");
+    try {
+      const p = await importApi.preview(importFile);
+      setImportPreview(p);
+    } catch (e: any) {
+      setImportError(e?.response?.data?.detail || "Failed to read file");
+    } finally {
+      setImportBusy(false);
+    }
+  };
+
+  const runConfirm = async () => {
+    if (!importFile) return;
+    if (importPreview && importPreview.valid_rows === 0) {
+      setImportError("No valid rows to import. Fix the errors and try again.");
+      return;
+    }
+    setImportBusy(true);
+    setImportError("");
+    try {
+      const c = await importApi.confirm(importFile);
+      setImportResult(c);
+      if (c.successful > 0) fetchEmployees();
+    } catch (e: any) {
+      setImportError(e?.response?.data?.detail || "Import failed");
+    } finally {
+      setImportBusy(false);
+    }
+  };
+
   return (
     <DashboardLayout>
       <div className="space-y-5">
@@ -107,14 +161,22 @@ function EmployeesContent() {
             <p className="text-sm text-gray-400 mt-0.5">Manage your team members and their information</p>
           </div>
           <div className="flex items-center gap-2 self-start">
-            <button onClick={() => downloadCsv("/employees/export/employees.csv", "employees.csv")} className="inline-flex items-center gap-2 bg-white hover:bg-gray-50 text-gray-700 text-sm font-semibold px-4 py-2.5 rounded-xl transition-all border border-gray-200 hover:border-gray-300">
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
-              Export CSV
-            </button>
-            <Link href="/employees/new" className="inline-flex items-center gap-2 bg-primary-500 hover:bg-primary-600 text-white text-sm font-semibold px-5 py-2.5 rounded-xl transition-all shadow-md shadow-primary-200 hover:shadow-lg hover:shadow-primary-300">
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" /></svg>
-              Add Employee
-            </Link>
+            {isAdmin && (
+              <>
+                <button onClick={() => downloadCsv("/employees/export/employees.csv", "employees.csv")} className="inline-flex items-center gap-2 bg-white hover:bg-gray-50 text-gray-700 text-sm font-semibold px-4 py-2.5 rounded-xl transition-all border border-gray-200 hover:border-gray-300">
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+                  Export CSV
+                </button>
+                <button onClick={() => { setShowImportModal(true); setImportFile(null); setImportPreview(null); setImportResult(null); setImportError(""); }} className="inline-flex items-center gap-2 bg-white hover:bg-gray-50 text-gray-700 text-sm font-semibold px-4 py-2.5 rounded-xl transition-all border border-gray-200 hover:border-gray-300">
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+                  Import
+                </button>
+                <Link href="/employees/new" className="inline-flex items-center gap-2 bg-primary-500 hover:bg-primary-600 text-white text-sm font-semibold px-5 py-2.5 rounded-xl transition-all shadow-md shadow-primary-200 hover:shadow-lg hover:shadow-primary-300">
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" /></svg>
+                  Add Employee
+                </Link>
+              </>
+            )}
           </div>
         </div>
 
@@ -358,6 +420,114 @@ function EmployeesContent() {
           )}
         </div>
       </div>
+
+      {/* Import Modal */}
+      {showImportModal && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl p-6 max-w-lg w-full max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold text-gray-900">Import Employees</h3>
+              <button onClick={() => setShowImportModal(false)} className="text-gray-400 hover:text-gray-600">
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+              </button>
+            </div>
+
+            <div className="text-sm text-gray-500 mb-4">
+              Upload a <strong>.csv</strong> or <strong>.xlsx</strong> file with employee data.
+              Required columns: <code className="bg-gray-100 px-1 rounded">email, first_name, last_name, department, designation, joining_date</code>.
+              Duplicates and invalid rows are skipped and reported.
+              <a href={`${process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8001/api"}${importApi.templateUrl()}`}
+                download className="block mt-2 text-primary-600 hover:text-primary-700 font-semibold inline-flex items-center gap-1">
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+                Download template
+              </a>
+            </div>
+
+            <label className="block">
+              <span className="block text-xs font-medium text-gray-500 mb-1">Select file</span>
+              <input
+                type="file"
+                accept=".csv,.xlsx"
+                onChange={(e) => { const f = e.target.files?.[0]; if (f) handleImportFile(f); }}
+                className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2.5 file:mr-3 file:rounded-lg file:border-0 file:bg-primary-50 file:text-primary-600 file:px-3 file:py-1.5 file:text-xs file:font-semibold"
+              />
+            </label>
+
+            {importError && <p className="mt-3 text-xs text-red-500">{importError}</p>}
+
+            {importFile && !importPreview && !importResult && (
+              <div className="flex items-center justify-between mt-4 pt-4 border-t border-gray-100">
+                <span className="text-xs text-gray-400 font-mono">{importFile.name}</span>
+                <button onClick={runPreview} disabled={importBusy} className="px-4 py-2 text-sm font-semibold text-white bg-primary-500 hover:bg-primary-600 rounded-xl transition-colors disabled:opacity-50">
+                  {importBusy ? "Parsing..." : "Preview"}
+                </button>
+              </div>
+            )}
+
+            {importPreview && !importResult && (
+              <div className="mt-4">
+                <div className="flex flex-wrap gap-2 text-xs">
+                  <span className="inline-flex items-center px-2.5 py-1 rounded-full bg-primary-50 text-primary-600 font-semibold">Valid: {importPreview.valid_rows}</span>
+                  <span className="inline-flex items-center px-2.5 py-1 rounded-full bg-red-50 text-red-600 font-semibold">Invalid: {importPreview.invalid_rows}</span>
+                </div>
+                {importPreview.duplicates_in_file.length > 0 && (
+                  <p className="mt-2 text-xs text-amber-600">
+                    {importPreview.duplicates_in_file.length} duplicate row(s) detected within the file.
+                  </p>
+                )}
+                <div className="mt-3 max-h-48 overflow-y-auto border border-gray-100 rounded-xl divide-y divide-gray-50">
+                  {importPreview.preview.slice(0, 100).map((r) => (
+                    <div key={r.row} className="px-3 py-2 flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <p className="text-xs text-gray-500">Row {r.row}</p>
+                        <p className="text-xs text-gray-700 truncate">
+                          {(r.data.first_name || "")} {(r.data.last_name || "")} <span className="text-gray-400">&middot;</span>{' '}
+                          <span className="font-mono">{r.data.email || ""}</span>
+                        </p>
+                      </div>
+                      <span className={`flex-shrink-0 text-[10px] font-bold mt-0.5 ${r.valid ? "text-green-600" : "text-red-500"}`}>
+                        {r.valid ? "OK" : r.errors.join("; ")}
+                      </span>
+                    </div>
+                  ))}
+                  {importPreview.preview.length > 100 && (
+                    <p className="px-3 py-2 text-[11px] text-gray-400">Showing first 100 of {importPreview.preview.length} rows...</p>
+                  )}
+                </div>
+                <div className="flex gap-3 mt-4 pt-4 border-t border-gray-100">
+                  <button onClick={() => { setImportPreview(null); setImportFile(null); }} className="flex-1 px-4 py-2.5 text-sm font-semibold text-gray-600 bg-gray-100 rounded-xl hover:bg-gray-200 transition-colors">
+                    Choose different file
+                  </button>
+                  <button onClick={runConfirm} disabled={importBusy} className="flex-1 px-4 py-2.5 text-sm font-semibold text-white bg-primary-500 rounded-xl hover:bg-primary-600 transition-colors disabled:opacity-50">
+                    {importBusy ? "Importing..." : "Confirm Import"}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {importResult && (
+              <div className="mt-4">
+                <div className="flex flex-wrap gap-2 text-xs">
+                  <span className="inline-flex items-center px-2.5 py-1 rounded-full bg-green-50 text-green-600 font-semibold">Imported: {importResult.successful}</span>
+                  <span className="inline-flex items-center px-2.5 py-1 rounded-full bg-red-50 text-red-600 font-semibold">Failed: {importResult.failed}</span>
+                </div>
+                {importResult.failures.length > 0 && (
+                  <div className="mt-3 max-h-40 overflow-y-auto border border-gray-100 rounded-xl divide-y divide-gray-50">
+                    {importResult.failures.map((f) => (
+                      <div key={f.row} className="px-3 py-2 text-xs text-gray-500">
+                        Row {f.row}: <span className="text-red-500">{f.error}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <button onClick={() => setShowImportModal(false)} className="w-full px-4 py-2.5 text-sm font-semibold text-white bg-primary-500 rounded-xl hover:bg-primary-600 transition-colors">
+                  Done
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </DashboardLayout>
   );
 }

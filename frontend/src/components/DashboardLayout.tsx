@@ -1,26 +1,63 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
+import {
+  ROLE_LABELS,
+  STAFF_ROLES,
+  ADMIN_ROLES,
+  clearSession,
+  syncRoleCookie,
+} from "@/lib/auth";
+import type { UserRole } from "@/lib/api";
 
-const menuItems = [
-  { name: "Dashboard", href: "/dashboard", icon: "M3 12l9-9 9 9M5 10v10a1 1 0 001 1h4v-6h4v6h4a1 1 0 001-1V10" },
-  { name: "Employees", href: "/employees", icon: "M17 20h5v-2a4 4 0 00-3-3.87M9 20H4v-2a4 4 0 013-3.87m6-1.13a4 4 0 10-4-4 4 4 0 004 4zm6-4a3 3 0 11-3-3 3 3 0 013 3z" },
-  { name: "Attendance", href: "/attendance", icon: "M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" },
-  { name: "Leaves", href: "/leaves", icon: "M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" },
+const allMenuItems = [
+  { name: "Dashboard", href: "/dashboard", icon: "M3 12l9-9 9 9M5 10v10a1 1 0 001 1h4v-6h4v6h4a1 1 0 001-1V10", roles: ["SUPER_ADMIN", "HR", "MANAGER", "EMPLOYEE"] },
+  { name: "Employees", href: "/employees", icon: "M17 20h5v-2a4 4 0 00-3-3.87M9 20H4v-2a4 4 0 013-3.87m6-1.13a4 4 0 10-4-4 4 4 0 004 4zm6-4a3 3 0 11-3-3 3 3 0 013 3z", roles: STAFF_ROLES },
+  { name: "Attendance", href: "/attendance", icon: "M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01", roles: STAFF_ROLES },
+  { name: "Leaves", href: "/leaves", icon: "M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z", roles: STAFF_ROLES },
+  { name: "Reports", href: "/reports", icon: "M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z", roles: ["SUPER_ADMIN", "HR", "MANAGER", "EMPLOYEE"] },
+  { name: "Users & Roles", href: "/users", icon: "M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-3-5.196M13 7a4 4 0 11-8 0 4 4 0 018 0z", roles: ADMIN_ROLES },
 ];
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [role, setRole] = useState<string | null>(null);
+
+  // Read role from localStorage once available on the client.
+  useEffect(() => {
+    syncRoleCookie();
+    const stored = localStorage.getItem("role");
+    const token = localStorage.getItem("token");
+    if (token && stored) {
+      setRole(stored);
+    } else if (token) {
+      // Token present but no stored role → refresh from /me.
+      import("@/lib/api").then(({ authApi }) =>
+        authApi
+          .getMe(token)
+          .then((r) => {
+            localStorage.setItem("role", r.data.role);
+            setRole(r.data.role);
+          })
+          .catch(() => clearSession())
+      );
+    }
+  }, []);
+
+  const menuItems = (allMenuItems as typeof allMenuItems).filter((item) =>
+    item.roles.includes((role || "") as UserRole)
+  );
 
   const handleLogout = () => {
-    localStorage.removeItem("token");
-    document.cookie = "token=; path=/; max-age=0";
+    clearSession();
     router.push("/login");
   };
+
+  const initials = role ? role.charAt(0) : "U";
 
   return (
     <div className="min-h-screen bg-[#E9E9F1] p-3 sm:p-4">
@@ -123,11 +160,11 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
               </button>
               <div className="flex items-center gap-2.5 pl-1 pr-2 py-1 cursor-pointer">
                 <div className="w-9 h-9 rounded-full bg-gradient-to-br from-primary-400 to-primary-600 flex items-center justify-center text-white text-xs font-bold">
-                  A
+                  {initials}
                 </div>
                 <div className="hidden sm:block leading-tight">
-                  <p className="text-xs font-bold text-gray-900">Admin</p>
-                  <p className="text-[10px] text-gray-400">HR Manager</p>
+                  <p className="text-xs font-bold text-gray-900">{(role && ROLE_LABELS[(role as UserRole)]) || "Account"}</p>
+                  <p className="text-[10px] text-gray-400">{role || "…"}</p>
                 </div>
                 <svg className="w-3 h-3 text-gray-400" fill="none" stroke="currentColor" strokeWidth="2.2" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />

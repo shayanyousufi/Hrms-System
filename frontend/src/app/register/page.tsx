@@ -4,6 +4,7 @@ import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { authApi } from "@/lib/api";
+import { saveSession } from "@/lib/auth";
 
 export default function RegisterPage() {
   const router = useRouter();
@@ -29,7 +30,7 @@ export default function RegisterPage() {
 
     try {
       const response = await authApi.register({ email, password, phone });
-      localStorage.setItem("token", response.data.access_token);
+      saveSession(response.data.access_token, response.data.user.role);
       setShowSuccess(true);
       setTimeout(() => {
         router.push("/login");

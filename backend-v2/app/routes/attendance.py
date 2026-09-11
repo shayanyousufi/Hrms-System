@@ -8,7 +8,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import Body
 
 from app.core.database import get_db
-from app.core.deps import get_current_user
+from app.core.deps import get_current_user, require_roles
+from app.core.config import UserRole
 from app.models.employee import Attendance, Employee, ActivityLog
 from app.models.user import User
 from app.schemas.employee import (
@@ -29,18 +30,30 @@ router = APIRouter(
 async def attendance_stats(
     date: str = Query("", description="YYYY-MM-DD, defaults to today"),
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.HR, UserRole.MANAGER)),
 ):
     target_date = _parse_date(date)
-    emp_result = await db.execute(
-        select(func.count(Employee.id)).where(Employee.employment_status == "Active")
-    )
-    total_employees = emp_result.scalar() or 0
 
-    rows = await db.execute(
+    # Manager view is scoped to their direct reports only.
+    manager_ids = await _team_scope_ids(db, current_user)
+    scoped = manager_ids is not None
+
+    total_query = select(func.count(Employee.id)).where(Employee.employment_status == "Active")
+    rows_query = (
         select(Attendance.status, func.count(Attendance.id))
         .where(Attendance.date == target_date)
         .group_by(Attendance.status)
     )
+
+    if scoped:
+        team = list(manager_ids or ())
+        total_query = total_query.where(Employee.id.in_(team))
+        rows_query = rows_query.where(Attendance.employee_id.in_(team))
+
+    emp_result = await db.execute(total_query)
+    total_employees = emp_result.scalar() or 0
+
+    rows = await db.execute(rows_query)
     counts = {status: count for status, count in rows.all()}
 
     present = counts.get("Present", 0)
@@ -60,6 +73,26 @@ async def attendance_stats(
     )
 
 
+async def _team_scope_ids(db: AsyncSession, current_user: User):
+    """Return a tuple of employee ids in a MANAGER's direct-report team, else None.
+
+    - SUPER_ADMIN / HR -> None (no scoping).
+    - MANAGER -> tuple of direct-report employee ids (may be empty).
+    - EMPLOYEE triggers None (these endpoints are staff-only).
+    """
+    if current_user.role != UserRole.MANAGER.value:
+        return None
+    my_employee = (await db.execute(
+        select(Employee).where(Employee.user_id == current_user.id)
+    )).scalar_one_or_none()
+    if my_employee is None:
+        return ()
+    team = (await db.execute(
+        select(Employee.id).where(Employee.manager_id == my_employee.id)
+    )).scalars().all()
+    return tuple(team)
+
+
 @router.get("/records", response_model=PaginatedAttendanceRecords)
 async def all_attendance_records(
     page: int = Query(1, ge=1),
@@ -69,12 +102,18 @@ async def all_attendance_records(
     status_filter: str = Query("", alias="status", description="Filter by attendance status"),
     date: str = Query("", description="YYYY-MM-DD, defaults to today"),
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.HR, UserRole.MANAGER)),
 ):
     target_date = _parse_date(date)
 
     filters = [Attendance.date == target_date]
     if status_filter:
         filters.append(Attendance.status == status_filter)
+
+    # Manager sees only direct reports.
+    manager_ids = await _team_scope_ids(db, current_user)
+    if manager_ids is not None:
+        filters.append(Attendance.employee_id.in_(manager_ids or ()))
 
     query = (
         select(Attendance, Employee)
@@ -127,15 +166,20 @@ async def all_attendance_records(
 @router.get("/today", response_model=list[TodayAttendanceItem])
 async def today_attendance(
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.HR, UserRole.MANAGER)),
 ):
     """All employees with their status for today (including those not checked in)."""
     today = dt.now().date()
 
-    emp_result = await db.execute(
-        select(Employee).where(
-            Employee.employment_status.in_(["Active", "On Leave"])
-        )
+    manager_ids = await _team_scope_ids(db, current_user)
+
+    emp_query = select(Employee).where(
+        Employee.employment_status.in_(["Active", "On Leave"])
     )
+    if manager_ids is not None:
+        emp_query = emp_query.where(Employee.id.in_(manager_ids or ()))
+
+    emp_result = await db.execute(emp_query)
     employees = emp_result.scalars().all()
 
     result = await db.execute(
@@ -178,9 +222,14 @@ async def my_status(
 ):
     """Current user's own employee + today's check-in/out status (creates one if needed)."""
     emp_result = await db.execute(
-        select(Employee).where(Employee.email == current_user.email)
+        select(Employee).where(Employee.user_id == current_user.id)
     )
     emp = emp_result.scalar_one_or_none()
+    if not emp:
+        emp_result = await db.execute(
+            select(Employee).where(Employee.email == current_user.email)
+        )
+        emp = emp_result.scalar_one_or_none()
 
     # If the logged-in user has no employee record yet, create a personal one so
     # they always have their own attendance to clock in/out against.
@@ -235,6 +284,7 @@ async def my_status(
 async def check_in(
     payload: dict = Body(...),
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     employee_id: str = payload.get("employee_id") or ""
     emp_result = await db.execute(
@@ -243,6 +293,8 @@ async def check_in(
     emp = emp_result.scalar_one_or_none()
     if not emp:
         raise HTTPException(status_code=404, detail="Employee not found")
+
+    await _require_self_or_team(db, emp, current_user)
 
     today = dt.now().date()
     result = await db.execute(
@@ -280,6 +332,7 @@ async def check_in(
 async def check_out(
     payload: dict = Body(...),
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     employee_id: str = payload.get("employee_id") or ""
     emp_result = await db.execute(
@@ -288,6 +341,8 @@ async def check_out(
     emp = emp_result.scalar_one_or_none()
     if not emp:
         raise HTTPException(status_code=404, detail="Employee not found")
+
+    await _require_self_or_team(db, emp, current_user)
 
     today = dt.now().date()
     result = await db.execute(
@@ -315,6 +370,19 @@ async def check_out(
     return {"message": f"Checked out at {check_out_time}", "check_out": check_out_time}
 
 
+async def _require_self_or_team(db: AsyncSession, emp: Employee, current_user: User) -> None:
+    """Clock in/out only allowed on the user's own profile, their team, or all (HR/admin)."""
+    if current_user.role == UserRole.EMPLOYEE.value:
+        if not (emp.user_id is not None and emp.user_id == current_user.id):
+            raise HTTPException(status_code=403, detail="You can only clock in/out for yourself")
+    elif current_user.role == UserRole.MANAGER.value:
+        my_employee = (await db.execute(
+            select(Employee).where(Employee.user_id == current_user.id)
+        )).scalar_one_or_none()
+        if not my_employee or not (emp.manager_id is not None and emp.manager_id == my_employee.id):
+            raise HTTPException(status_code=403, detail="You can only clock in/out your direct reports")
+
+
 def _is_late(now: dt) -> bool:
     """Office starts at 09:00 — check-in after 09:00 counts as Late."""
     return now.hour > 9 or (now.hour == 9 and now.minute > 0)
@@ -324,13 +392,20 @@ def _is_late(now: dt) -> bool:
 async def activity_feed(
     limit: int = Query(10, ge=1, le=50),
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.HR, UserRole.MANAGER)),
 ):
-    result = await db.execute(
+    query = (
         select(ActivityLog, Employee)
         .join(Employee, Employee.id == ActivityLog.employee_id)
         .order_by(desc(ActivityLog.id))
         .limit(limit)
     )
+
+    manager_ids = await _team_scope_ids(db, current_user)
+    if manager_ids is not None:
+        query = query.where(ActivityLog.employee_id.in_(manager_ids or ()))
+
+    result = await db.execute(query)
     items = []
     for log, emp in result.all():
         items.append(

@@ -10,9 +10,11 @@ import {
   PaginatedAttendance,
   PaginatedLeaves,
   PaginatedActivities,
+  DocumentRecord,
 } from "@/lib/employeeApi";
+import { canManageEmployees } from "@/lib/auth";
 
-const tabs = ["Overview", "Attendance", "Leave", "Activity"];
+const tabs = ["Overview", "Attendance", "Leave", "Documents", "Activity"];
 
 const statusColors: Record<string, string> = {
   Active: "bg-green-100 text-green-700",
@@ -52,6 +54,12 @@ export default function EmployeeDetailPage({ params }: { params: { id: string } 
   const [activitiesData, setActivitiesData] = useState<PaginatedActivities | null>(null);
   const [activitiesPage, setActivitiesPage] = useState(1);
   const [activitiesLoading, setActivitiesLoading] = useState(false);
+
+  const [documents, setDocuments] = useState<DocumentRecord[]>([]);
+  const [documentsLoading, setDocumentsLoading] = useState(false);
+  const [docTypes, setDocTypes] = useState<string[]>([]);
+  const [documentError, setDocumentError] = useState("");
+
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [showLeaveModal, setShowLeaveModal] = useState(false);
@@ -59,6 +67,12 @@ export default function EmployeeDetailPage({ params }: { params: { id: string } 
   const [leaveSubmitting, setLeaveSubmitting] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [uploading, setUploading] = useState(false);
+  const [isAdmin, setIsAdmin] = useState(false);
+
+  useEffect(() => {
+    const role = localStorage.getItem("role");
+    setIsAdmin(canManageEmployees(role));
+  }, []);
 
   useEffect(() => {
     async function load() {
@@ -116,11 +130,27 @@ export default function EmployeeDetailPage({ params }: { params: { id: string } 
     }
   }, [employee]);
 
+  const fetchDocuments = useCallback(async () => {
+    if (!employee) return;
+    setDocumentsLoading(true);
+    setDocumentError("");
+    try {
+      const docs = await employeesApi.getDocuments(employee.employee_id);
+      setDocuments(docs);
+      setDocTypes(Array.from(new Set(docs.map((d) => d.doc_type).filter(Boolean)) as Set<string>).sort());
+    } catch (e: any) {
+      setDocumentError(e?.response?.data?.detail || "Failed to load documents");
+    } finally {
+      setDocumentsLoading(false);
+    }
+  }, [employee]);
+
   useEffect(() => {
     if (activeTab === "Attendance") fetchAttendance(attendancePage);
     if (activeTab === "Leave") fetchLeaves(leavesPage);
     if (activeTab === "Activity") fetchActivities(activitiesPage);
-  }, [activeTab, attendancePage, leavesPage, activitiesPage, fetchAttendance, fetchLeaves, fetchActivities]);
+    if (activeTab === "Documents") fetchDocuments();
+  }, [activeTab, attendancePage, leavesPage, activitiesPage, fetchAttendance, fetchLeaves, fetchActivities, fetchDocuments]);
 
   useEffect(() => {
     setAttendancePage(1);
@@ -132,10 +162,7 @@ export default function EmployeeDetailPage({ params }: { params: { id: string } 
     if (!employee) return;
     setDeleting(true);
     try {
-      const params = hard ? "?hard=true" : "";
-      await fetch(`http://localhost:8001/api/employees/${employee.employee_id}${params}`, {
-        method: "DELETE",
-      });
+      await employeesApi.delete(employee.employee_id, hard);
       router.push("/employees");
     } catch (e) {
       console.error(e);
@@ -175,6 +202,57 @@ export default function EmployeeDetailPage({ params }: { params: { id: string } 
     } finally {
       setUploading(false);
     }
+  };
+
+  const handleDocumentUpload = async (e: ChangeEvent<HTMLInputElement>, docType: string) => {
+    const file = e.target.files?.[0];
+    if (!file || !employee) return;
+    setUploading(true);
+    setDocumentError("");
+    try {
+      await employeesApi.uploadDocument(employee.employee_id, file, docType || "General");
+      await fetchDocuments();
+    } catch (err: any) {
+      setDocumentError(err?.response?.data?.detail || "Upload failed");
+    } finally {
+      setUploading(false);
+      e.target.value = "";
+    }
+  };
+
+  const handleDocumentDelete = async (doc: DocumentRecord) => {
+    if (!employee) return;
+    if (!window.confirm(`Delete "${doc.name}"?`)) return;
+    setDocumentError("");
+    try {
+      await employeesApi.deleteDocument(employee.employee_id, doc.id);
+      await fetchDocuments();
+    } catch (err: any) {
+      setDocumentError(err?.response?.data?.detail || "Delete failed");
+    }
+  };
+
+  const handleDocumentDownload = (doc: DocumentRecord) => {
+    const token = localStorage.getItem("token");
+    const base = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8001/api";
+    fetch(`${base}/employees/${employee!.employee_id}/documents/${doc.id}/download`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    })
+      .then((res) => {
+        if (!res.ok) throw new Error("Download failed");
+        return res.blob();
+      })
+      .then((blob) => {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = doc.name;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+      })
+      .catch(() => setDocumentError("Could not download document"));
   };
 
   if (loading) {
@@ -226,18 +304,22 @@ export default function EmployeeDetailPage({ params }: { params: { id: string } 
             </div>
           </div>
           <div className="flex flex-wrap gap-2 mt-5 pt-5 border-t border-gray-100">
-            <Link href={`/employees/${id}/edit`} className="bg-primary-50 hover:bg-primary-100 text-primary-600 text-sm font-semibold px-4 py-2 rounded-xl transition-colors flex items-center gap-2">
+            {isAdmin && (
+              <Link href={`/employees/${id}/edit`} className="bg-primary-50 hover:bg-primary-100 text-primary-600 text-sm font-semibold px-4 py-2 rounded-xl transition-colors flex items-center gap-2">
               <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>
               Edit
-            </Link>
+              </Link>
+            )}
             <button onClick={() => setShowLeaveModal(true)} className="bg-green-50 hover:bg-green-100 text-green-600 text-sm font-semibold px-4 py-2 rounded-xl transition-colors flex items-center gap-2">
               <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>
               Request Leave
             </button>
-            <button onClick={() => setShowDeleteModal(true)} className="bg-red-50 hover:bg-red-100 text-red-600 text-sm font-semibold px-4 py-2 rounded-xl transition-colors flex items-center gap-2">
+            {isAdmin && (
+              <button onClick={() => setShowDeleteModal(true)} className="bg-red-50 hover:bg-red-100 text-red-600 text-sm font-semibold px-4 py-2 rounded-xl transition-colors flex items-center gap-2">
               <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
               Delete
-            </button>
+              </button>
+            )}
           </div>
         </div>
 
@@ -430,6 +512,96 @@ export default function EmployeeDetailPage({ params }: { params: { id: string } 
                 </>
               ) : (
                 <EmptyState message="No leave records found" />
+              )}
+            </div>
+          )}
+
+          {activeTab === "Documents" && (
+            <div>
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
+                <h3 className="text-lg font-semibold text-gray-900">Documents</h3>
+                <div className="flex flex-wrap items-center gap-2">
+                  <select id="documentType" defaultValue="General" className="px-3 py-2 text-sm bg-gray-50 border border-gray-100 rounded-xl outline-none focus:border-primary-300 text-gray-600 min-w-[140px]">
+                    <option value="General">General</option>
+                    <option value="CNIC">CNIC</option>
+                    <option value="Contract">Contract</option>
+                    <option value="Offer Letter">Offer Letter</option>
+                    <option value="Resume">Resume</option>
+                    <option value="Degree">Degree</option>
+                    {docTypes.filter((t) => !["General", "CNIC", "Contract", "Offer Letter", "Resume", "Degree"].includes(t)).map((t) => (
+                      <option key={t} value={t}>{t}</option>
+                    ))}
+                  </select>
+                  <label className="inline-flex items-center gap-2 bg-primary-500 hover:bg-primary-600 text-white text-sm font-semibold px-4 py-2 rounded-xl transition-colors cursor-pointer disabled:opacity-50">
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0l-4 4m4-4v12" /></svg>
+                    {uploading ? "Uploading..." : "Upload"}
+                    <input
+                      type="file"
+                      accept=".pdf,.doc,.docx,.jpg,.jpeg,.png"
+                      className="hidden"
+                      disabled={uploading}
+                      onChange={(e) => handleDocumentUpload(e, (document.getElementById("documentType") as HTMLSelectElement)?.value || "General")}
+                    />
+                  </label>
+                </div>
+              </div>
+
+              {documentError && <p className="mb-3 text-xs text-red-500">{documentError}</p>}
+
+              {documentsLoading ? (
+                <div className="flex justify-center py-10"><div className="w-6 h-6 border-4 border-primary-200 border-t-primary-500 rounded-full animate-spin"></div></div>
+              ) : documents.length > 0 ? (
+                <>
+                  <div className="overflow-x-auto">
+                    <table className="w-full">
+                      <thead>
+                        <tr className="border-b border-gray-100">
+                          <th className="text-left px-4 py-3 text-xs font-semibold text-gray-400 uppercase">Name</th>
+                          <th className="text-left px-4 py-3 text-xs font-semibold text-gray-400 uppercase">Type</th>
+                          <th className="text-left px-4 py-3 text-xs font-semibold text-gray-400 uppercase">Uploaded</th>
+                          <th className="text-left px-4 py-3 text-xs font-semibold text-gray-400 uppercase">By</th>
+                          <th className="text-center px-4 py-3 text-xs font-semibold text-gray-400 uppercase">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {documents.map((d) => (
+                          <tr key={d.id} className="border-b border-gray-50">
+                            <td className="px-4 py-3">
+                              <p className="text-sm font-medium text-gray-700 flex items-center gap-2">
+                                <svg className="w-4 h-4 text-gray-300 flex-shrink-0" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" /></svg>
+                                {d.name}
+                              </p>
+                            </td>
+                            <td className="px-4 py-3">
+                              <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-primary-50 text-primary-600">{d.doc_type}</span>
+                            </td>
+                            <td className="px-4 py-3 text-sm text-gray-500">{d.uploaded_at ? new Date(d.uploaded_at).toLocaleString() : "-"}</td>
+                            <td className="px-4 py-3 text-sm text-gray-500">{d.uploaded_by_name || "System"}</td>
+                            <td className="px-4 py-3">
+                              <div className="flex items-center justify-center gap-2">
+                                {d.has_file ? (
+                                  <button onClick={() => handleDocumentDownload(d)} className="text-primary-500 hover:text-primary-700 text-xs font-semibold bg-primary-50 hover:bg-primary-100 px-2.5 py-1.5 rounded-lg transition-all" title="Download">
+                                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+                                  </button>
+                                ) : (
+                                  <span className="text-[11px] text-gray-300 font-medium">No file</span>
+                                )}
+                                {isAdmin && (
+                                  <button onClick={() => handleDocumentDelete(d)} className="text-red-500 hover:text-red-700 text-xs font-semibold bg-red-50 hover:bg-red-100 px-2.5 py-1.5 rounded-lg transition-all" title="Delete">
+                                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                                  </button>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  <p className="text-xs text-gray-400 mt-3">{documents.length} document(s)</p>
+                </>
+              ) : (
+                <EmptyState message="No documents found" />
               )}
             </div>
           )}
