@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useState, useEffect, useCallback, useRef, ChangeEvent } from "react";
 import Link from "next/link";
@@ -12,7 +12,7 @@ import {
   PaginatedActivities,
   DocumentRecord,
 } from "@/lib/employeeApi";
-import { canManageEmployees } from "@/lib/auth";
+import { canManageEmployees, getStoredRoles } from "@/lib/auth";
 
 const tabs = ["Overview", "Attendance", "Leave", "Documents", "Activity"];
 
@@ -70,8 +70,8 @@ export default function EmployeeDetailPage({ params }: { params: { id: string } 
   const [isAdmin, setIsAdmin] = useState(false);
 
   useEffect(() => {
-    const role = localStorage.getItem("role");
-    setIsAdmin(canManageEmployees(role));
+    const storedRoles = getStoredRoles();
+    setIsAdmin(canManageEmployees(storedRoles));
   }, []);
 
   useEffect(() => {

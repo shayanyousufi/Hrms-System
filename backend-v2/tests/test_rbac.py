@@ -80,6 +80,7 @@ def employee_user(client):
         _sql(f"DELETE FROM activity_logs WHERE employee_id IN (SELECT id FROM employees WHERE employee_id='{emp_code}')")
         _sql(f"DELETE FROM attendance WHERE employee_id IN (SELECT id FROM employees WHERE employee_id='{emp_code}')")
         _sql(f"DELETE FROM employees WHERE employee_id='{emp_code}'")
+        _sql(f"DELETE FROM user_roles WHERE user_id = {user_id}")
         _sql(f"DELETE FROM users WHERE id={user_id}")
     except Exception:
         pass
@@ -93,9 +94,11 @@ def super_admin(client):
     assert r.status_code in (200, 201), r.text
     user_id = r.json()["user"]["id"]
     token = r.json()["access_token"]
-    _sql(f"UPDATE users SET role='SUPER_ADMIN' WHERE id={user_id}")
+    _sql(f"DELETE FROM user_roles WHERE user_id = {user_id}")
+    _sql(f"INSERT INTO user_roles (user_id, role_id) SELECT {user_id}, id FROM roles WHERE name = 'SUPER_ADMIN'")
     yield {"email": email, "password": "ReusablePass1", "token": token, "user_id": user_id}
     try:
+        _sql(f"DELETE FROM user_roles WHERE user_id = {user_id}")
         _sql(f"DELETE FROM users WHERE id={user_id}")
     except Exception:
         pass
@@ -106,9 +109,11 @@ def test_register_always_employee(client):
     r = _register(client, email)
     assert r.status_code in (200, 201), r.text
     data = r.json()
-    assert data["user"]["role"] == "EMPLOYEE"
+    assert "EMPLOYEE" in data["user"]["roles"]
     assert "access_token" in data
-    _sql(f"DELETE FROM users WHERE id={data['user']['id']}")
+    uid = data['user']['id']
+    _sql(f"DELETE FROM user_roles WHERE user_id = {uid}")
+    _sql(f"DELETE FROM users WHERE id={uid}")
 
 
 def test_employee_cannot_access_staff_endpoints(client, employee_user):
@@ -218,7 +223,7 @@ def test_admin_list_users_and_promote(client, employee_user, super_admin):
         headers={"Authorization": f"Bearer {super_admin['token']}"},
     )
     assert r.status_code == 200, r.text
-    assert r.json()["role"] == "HR"
+    assert "HR" in r.json()["roles"]
 
     # Set it back to EMPLOYEE for subsequent tests.
     r = client.patch(
@@ -236,7 +241,8 @@ def test_hr_cannot_escalate_to_admin_role(client, super_admin):
     assert r.status_code in (200, 201), r.text
     hr_id = r.json()["user"]["id"]
     try:
-        _sql(f"UPDATE users SET role='HR' WHERE id={hr_id}")
+        _sql(f"DELETE FROM user_roles WHERE user_id = {hr_id}")
+        _sql(f"INSERT INTO user_roles (user_id, role_id) SELECT {hr_id}, id FROM roles WHERE name = 'HR'")
         hr_token = r.json()["access_token"]
         # HR trying to assign HR/Super Admin should be rejected with 403.
         target = _reg_email()
@@ -262,10 +268,12 @@ def test_hr_cannot_escalate_to_admin_role(client, super_admin):
                 headers={"Authorization": f"Bearer {hr_token}"},
             )
             assert rr3.status_code == 200, rr3.text
-            assert rr3.json()["role"] == "MANAGER"
+            assert "MANAGER" in rr3.json()["roles"]
         finally:
+            _sql(f"DELETE FROM user_roles WHERE user_id = {target_id}")
             _sql(f"DELETE FROM users WHERE id={target_id}")
     finally:
+        _sql(f"DELETE FROM user_roles WHERE user_id = {hr_id}")
         _sql(f"DELETE FROM users WHERE id={hr_id}")
 
 
@@ -292,6 +300,7 @@ def test_link_employee_endpoint(client, super_admin):
         assert linked == str(user_id)
     finally:
         _delete_employee(code)
+        _sql(f"DELETE FROM user_roles WHERE user_id = {user_id}")
         _sql(f"DELETE FROM users WHERE id={user_id}")
 
 
@@ -299,4 +308,4 @@ def test_logout_session_endpoints_test_me_after_login(client, employee_user):
     r = _login(client, employee_user["email"], employee_user["password"])
     assert r.status_code == 200, r.text
     data = r.json()
-    assert data["user"]["role"] == "EMPLOYEE"
+    assert "EMPLOYEE" in data["user"]["roles"]

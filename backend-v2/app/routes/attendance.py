@@ -80,7 +80,7 @@ async def _team_scope_ids(db: AsyncSession, current_user: User):
     - MANAGER -> tuple of direct-report employee ids (may be empty).
     - EMPLOYEE triggers None (these endpoints are staff-only).
     """
-    if current_user.role != UserRole.MANAGER.value:
+    if not current_user.has_role(UserRole.MANAGER.value):
         return None
     my_employee = (await db.execute(
         select(Employee).where(Employee.user_id == current_user.id)
@@ -372,10 +372,10 @@ async def check_out(
 
 async def _require_self_or_team(db: AsyncSession, emp: Employee, current_user: User) -> None:
     """Clock in/out only allowed on the user's own profile, their team, or all (HR/admin)."""
-    if current_user.role == UserRole.EMPLOYEE.value:
+    if current_user.has_role(UserRole.EMPLOYEE.value):
         if not (emp.user_id is not None and emp.user_id == current_user.id):
             raise HTTPException(status_code=403, detail="You can only clock in/out for yourself")
-    elif current_user.role == UserRole.MANAGER.value:
+    elif current_user.has_role(UserRole.MANAGER.value):
         my_employee = (await db.execute(
             select(Employee).where(Employee.user_id == current_user.id)
         )).scalar_one_or_none()

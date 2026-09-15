@@ -9,6 +9,7 @@ import {
   ADMIN_ROLES,
   clearSession,
   syncRoleCookie,
+  getStoredRoles,
 } from "@/lib/auth";
 import type { UserRole } from "@/lib/api";
 
@@ -25,23 +26,21 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const pathname = usePathname();
   const router = useRouter();
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [role, setRole] = useState<string | null>(null);
+  const [roles, setRoles] = useState<string[]>([]);
 
-  // Read role from localStorage once available on the client.
   useEffect(() => {
     syncRoleCookie();
-    const stored = localStorage.getItem("role");
+    const stored = getStoredRoles();
     const token = localStorage.getItem("token");
-    if (token && stored) {
-      setRole(stored);
+    if (token && stored.length > 0) {
+      setRoles(stored);
     } else if (token) {
-      // Token present but no stored role → refresh from /me.
       import("@/lib/api").then(({ authApi }) =>
         authApi
           .getMe(token)
           .then((r) => {
-            localStorage.setItem("role", r.data.role);
-            setRole(r.data.role);
+            localStorage.setItem("roles", JSON.stringify(r.data.roles));
+            setRoles(r.data.roles);
           })
           .catch(() => clearSession())
       );
@@ -49,7 +48,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   }, []);
 
   const menuItems = (allMenuItems as typeof allMenuItems).filter((item) =>
-    item.roles.includes((role || "") as UserRole)
+    roles.some((r) => item.roles.includes(r as UserRole))
   );
 
   const handleLogout = () => {
@@ -57,7 +56,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     router.push("/login");
   };
 
-  const initials = role ? role.charAt(0) : "U";
+  const initials = roles.length > 0 ? roles[0].charAt(0) : "U";
 
   return (
     <div className="min-h-screen bg-[#E9E9F1] p-3 sm:p-4">
@@ -163,8 +162,12 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                   {initials}
                 </div>
                 <div className="hidden sm:block leading-tight">
-                  <p className="text-xs font-bold text-gray-900">{(role && ROLE_LABELS[(role as UserRole)]) || "Account"}</p>
-                  <p className="text-[10px] text-gray-400">{role || "…"}</p>
+                  <p className="text-xs font-bold text-gray-900">
+                    {roles.length > 0 ? roles.map((r) => ROLE_LABELS[r as UserRole] || r).join(", ") : "Account"}
+                  </p>
+                  <p className="text-[10px] text-gray-400">
+                    {roles.length > 0 ? roles.join(", ") : "\u2026"}
+                  </p>
                 </div>
                 <svg className="w-3 h-3 text-gray-400" fill="none" stroke="currentColor" strokeWidth="2.2" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />

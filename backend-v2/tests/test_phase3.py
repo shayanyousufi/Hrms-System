@@ -77,7 +77,8 @@ def hr_token(client):
     r = _register(client, email)
     assert r.status_code in (200, 201), r.text
     uid = r.json()["user"]["id"]
-    _sql(f"UPDATE users SET role='HR' WHERE id={uid}")
+    _sql(f"DELETE FROM user_roles WHERE user_id = {uid}")
+    _sql(f"INSERT INTO user_roles (user_id, role_id) SELECT {uid}, id FROM roles WHERE name = 'HR'")
     return _login(client, email).json()["access_token"]
 
 

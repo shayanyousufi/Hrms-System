@@ -29,7 +29,7 @@ class UserResponse(BaseModel):
     id: int
     email: str
     phone: Optional[str] = None
-    role: str = UserRole.EMPLOYEE.value
+    roles: list[str] = [UserRole.EMPLOYEE.value]
 
     class Config:
         from_attributes = True
@@ -41,6 +41,18 @@ class UpdateRoleRequest(BaseModel):
     @field_validator("role")
     @classmethod
     def validate_role(cls, v: UserRole) -> UserRole:
+        return v
+
+
+class UpdateRolesRequest(BaseModel):
+    """Replace all roles for a user with the given set."""
+    roles: list[UserRole]
+
+    @field_validator("roles")
+    @classmethod
+    def validate_roles(cls, v: list[UserRole]) -> list[UserRole]:
+        if not v:
+            raise ValueError("At least one role is required")
         return v
 
 

@@ -12,7 +12,13 @@ const ADMIN_ROLES = ["SUPER_ADMIN", "HR"];
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
   const token = request.cookies.get("token")?.value;
-  const role = request.cookies.get("role")?.value || "";
+  const primaryRole = request.cookies.get("role")?.value || "";
+  const rolesCookie = request.cookies.get("roles")?.value;
+  const roles: string[] = rolesCookie
+    ? rolesCookie.split(",").map((r) => r.trim())
+    : primaryRole
+      ? [primaryRole]
+      : [];
 
   const isProtected = protectedRoutes.some((route) => pathname === route || pathname.startsWith(`${route}/`));
   const isAuthRoute = authRoutes.includes(pathname);
@@ -34,10 +40,10 @@ export function middleware(request: NextRequest) {
     const isStaffRoute = staffRoutes.some((route) => pathname === route || pathname.startsWith(`${route}/`));
     const isAdminRoute = adminRoutes.some((route) => pathname === route || pathname.startsWith(`${route}/`));
 
-    if (isStaffRoute && !STAFF_ROLES.includes(role)) {
+    if (isStaffRoute && !roles.some((r) => STAFF_ROLES.includes(r))) {
       return NextResponse.redirect(new URL("/dashboard", request.url));
     }
-    if (isAdminRoute && !ADMIN_ROLES.includes(role)) {
+    if (isAdminRoute && !roles.some((r) => ADMIN_ROLES.includes(r))) {
       return NextResponse.redirect(new URL("/dashboard", request.url));
     }
   }

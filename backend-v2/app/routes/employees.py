@@ -34,13 +34,13 @@ router = APIRouter(prefix="/api/employees", tags=["employees"], dependencies=[De
 
 def _manage_roles_only(current_user) -> bool:
     """True when the user manages employees (HR/Super Admin), not self-scoped."""
-    return current_user.role in (UserRole.SUPER_ADMIN.value, UserRole.HR.value)
+    return current_user.has_any_role(UserRole.SUPER_ADMIN.value, UserRole.HR.value)
 
 
 def _is_self_or_staff(employee: Employee, current_user) -> bool:
     """True when the current EMPLOYEE is viewing their own record."""
     return (
-        current_user.role == UserRole.EMPLOYEE.value
+        current_user.has_role(UserRole.EMPLOYEE.value)
         and employee.user_id is not None
         and employee.user_id == current_user.id
     )
@@ -60,7 +60,7 @@ async def _ensure_employee_access(db: AsyncSession, employee: Employee, current_
     """
     if _manage_roles_only(current_user):
         return
-    if current_user.role == UserRole.MANAGER.value:
+    if current_user.has_role(UserRole.MANAGER.value):
         my_employee = (await db.execute(
             select(Employee).where(Employee.user_id == current_user.id)
         )).scalar_one_or_none()
@@ -73,9 +73,9 @@ async def _ensure_employee_access(db: AsyncSession, employee: Employee, current_
 
 async def _require_approve_rights(db: AsyncSession, employee: Employee, current_user: User) -> None:
     """Leave approve/reject rights: HR, Super Admin, or the direct manager."""
-    if current_user.role in (UserRole.SUPER_ADMIN.value, UserRole.HR.value):
+    if current_user.has_any_role(UserRole.SUPER_ADMIN.value, UserRole.HR.value):
         return
-    if current_user.role == UserRole.MANAGER.value:
+    if current_user.has_role(UserRole.MANAGER.value):
         my_employee = (await db.execute(
             select(Employee).where(Employee.user_id == current_user.id)
         )).scalar_one_or_none()
@@ -108,7 +108,7 @@ async def list_employees(
     count_query = select(func.count(Employee.id))
 
     # Managers only see their direct reports — never all employees.
-    if current_user.role == UserRole.MANAGER.value:
+    if current_user.has_role(UserRole.MANAGER.value):
         my_employee = (await db.execute(
             select(Employee).where(Employee.user_id == current_user.id)
         )).scalar_one_or_none()
@@ -196,7 +196,7 @@ async def get_stats(
 
     # Manager sees team-scoped overview only.
     manager_ids = None
-    if current_user.role == UserRole.MANAGER.value:
+    if current_user.has_role(UserRole.MANAGER.value):
         my_employee = (await db.execute(
             select(Employee).where(Employee.user_id == current_user.id)
         )).scalar_one_or_none()
@@ -286,7 +286,7 @@ async def get_employee(
     if _manage_roles_only(current_user):
         # HR / Super Admin: full access
         pass
-    elif current_user.role == UserRole.MANAGER.value:
+    elif current_user.has_role(UserRole.MANAGER.value):
         my_employee = (await db.execute(
             select(Employee).where(Employee.user_id == current_user.id)
         )).scalar_one_or_none()
@@ -368,7 +368,7 @@ async def delete_employee(
     current_user: User = Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.HR)),
 ):
     # Hard delete is SUPER_ADMIN only.
-    if hard and current_user.role != UserRole.SUPER_ADMIN.value:
+    if hard and not current_user.has_role(UserRole.SUPER_ADMIN.value):
         raise HTTPException(
             status_code=403,
             detail="Only Super Admin can permanently delete employees",
@@ -441,10 +441,10 @@ async def check_in(
     if not employee:
         raise HTTPException(status_code=404, detail="Employee not found")
     # EMPLOYEE can only check themselves in; managers/HR/admin can check-in team/all.
-    if current_user.role == UserRole.EMPLOYEE.value:
+    if current_user.has_role(UserRole.EMPLOYEE.value):
         if not _is_self_or_staff(employee, current_user):
             raise HTTPException(status_code=403, detail="You can only check yourself in")
-    elif current_user.role == UserRole.MANAGER.value:
+    elif current_user.has_role(UserRole.MANAGER.value):
         my_employee = (await db.execute(
             select(Employee).where(Employee.user_id == current_user.id)
         )).scalar_one_or_none()
@@ -483,10 +483,10 @@ async def check_out(
     employee = await db.get(Employee, employee_id)
     if not employee:
         raise HTTPException(status_code=404, detail="Employee not found")
-    if current_user.role == UserRole.EMPLOYEE.value:
+    if current_user.has_role(UserRole.EMPLOYEE.value):
         if not _is_self_or_staff(employee, current_user):
             raise HTTPException(status_code=403, detail="You can only check yourself out")
-    elif current_user.role == UserRole.MANAGER.value:
+    elif current_user.has_role(UserRole.MANAGER.value):
         my_employee = (await db.execute(
             select(Employee).where(Employee.user_id == current_user.id)
         )).scalar_one_or_none()
@@ -525,10 +525,10 @@ async def get_today_attendance(
     employee = await db.get(Employee, employee_id)
     if not employee:
         raise HTTPException(status_code=404, detail="Employee not found")
-    if current_user.role == UserRole.EMPLOYEE.value:
+    if current_user.has_role(UserRole.EMPLOYEE.value):
         if not _is_self_or_staff(employee, current_user):
             raise HTTPException(status_code=403, detail="You can only view your own status")
-    elif current_user.role == UserRole.MANAGER.value:
+    elif current_user.has_role(UserRole.MANAGER.value):
         my_employee = (await db.execute(
             select(Employee).where(Employee.user_id == current_user.id)
         )).scalar_one_or_none()
@@ -883,7 +883,7 @@ async def create_leave(
     current_user: User = Depends(get_current_user),
 ):
     # EMPLOYEE may only submit leave for their own linked profile.
-    if current_user.role == UserRole.EMPLOYEE.value:
+    if current_user.has_role(UserRole.EMPLOYEE.value):
         own = (await db.execute(
             select(Employee).where(Employee.user_id == current_user.id)
         )).scalar_one_or_none()
@@ -968,7 +968,7 @@ async def get_all_leaves(
     count_query = select(func.count(LeaveRecord.id))
 
     # Manager sees only their direct reports' leave.
-    if current_user.role == UserRole.MANAGER.value:
+    if current_user.has_role(UserRole.MANAGER.value):
         my_employee = (await db.execute(
             select(Employee).where(Employee.user_id == current_user.id)
         )).scalar_one_or_none()
@@ -1095,7 +1095,7 @@ async def export_attendance_csv(
     query = select(Attendance, Employee).join(Employee, Attendance.employee_id == Employee.id)
 
     # Manager exports only their team's attendance.
-    if current_user.role == UserRole.MANAGER.value:
+    if current_user.has_role(UserRole.MANAGER.value):
         my_employee = (await db.execute(
             select(Employee).where(Employee.user_id == current_user.id)
         )).scalar_one_or_none()
@@ -1162,7 +1162,7 @@ async def export_leaves_csv(
     q = select(LeaveRecord, Employee).join(Employee, LeaveRecord.employee_id == Employee.id)
 
     # Manager exports only their team's leave.
-    if current_user.role == UserRole.MANAGER.value:
+    if current_user.has_role(UserRole.MANAGER.value):
         my_employee = (await db.execute(
             select(Employee).where(Employee.user_id == current_user.id)
         )).scalar_one_or_none()

@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback } from "react";
 import Link from "next/link";
 import DashboardLayout from "@/components/DashboardLayout";
 import { employeesApi, DashboardStats, EmployeeListItem, TaskRecord, MeetingRecord, PaginatedTasks, PaginatedMeetings, PaginatedResponse, ActivityFeedItem } from "@/lib/employeeApi";
-import { isStaffRole } from "@/lib/auth";
+import { isStaffRole, getStoredRoles } from "@/lib/auth";
 
 const barShades = ["bg-primary-500", "bg-primary-300", "bg-primary-400", "bg-primary-500", "bg-primary-300", "bg-primary-400", "bg-primary-500"];
 
@@ -29,7 +29,7 @@ const badgeStyles: Record<string, string> = {
 };
 
 export default function DashboardPage() {
-  const [role, setRole] = useState<string | null>(null);
+  const [roles, setRoles] = useState<string[]>([]);
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [recentData, setRecentData] = useState<PaginatedResponse | null>(null);
   const [recentPage, setRecentPage] = useState(1);
@@ -47,11 +47,11 @@ export default function DashboardPage() {
   const [activity, setActivity] = useState<ActivityFeedItem[]>([]);
 
   useEffect(() => {
-    const stored = localStorage.getItem("role");
-    if (stored) setRole(stored);
+    const stored = getStoredRoles();
+    if (stored.length > 0) setRoles(stored);
   }, []);
 
-  const isStaff = isStaffRole(role);
+  const isStaff = isStaffRole(roles);
 
   useEffect(() => {
     async function load() {

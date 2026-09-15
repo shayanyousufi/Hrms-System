@@ -32,7 +32,7 @@ export interface AuthUser {
   id: number;
   email: string;
   phone: string | null;
-  role: UserRole;
+  roles: UserRole[];
 }
 
 export interface AuthResponse {
@@ -69,6 +69,8 @@ export const authApi = {
   listUsers: () => api.get<AuthUser[]>("/auth/users"),
   updateRole: (userId: number, role: UserRole) =>
     api.patch<AuthUser>(`/auth/users/${userId}/role`, { role }),
+  updateRolesBulk: (userId: number, roles: UserRole[]) =>
+    api.patch<AuthUser>(`/auth/users/${userId}/roles`, { roles }),
   linkEmployee: (userId: number, employeeId: number) =>
     api.post<AuthUser>(`/auth/users/${userId}/link-employee`, { employee_id: employeeId }),
 };

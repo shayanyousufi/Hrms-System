@@ -6,7 +6,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import DashboardLayout from "@/components/DashboardLayout";
 import { employeesApi, PaginatedResponse, downloadCsv } from "@/lib/employeeApi";
 import { importApi, ImportPreview, ImportConfirm } from "@/lib/importApi";
-import { canManageEmployees } from "@/lib/auth";
+import { canManageEmployees, getStoredRoles } from "@/lib/auth";
 
 const departments = ["Engineering", "Design", "HR", "Finance", "Marketing", "Sales"];
 const statuses = ["Active", "On Leave", "Inactive"];
@@ -81,8 +81,8 @@ function EmployeesContent() {
   }, [page, search, department, status, sortBy, sortOrder, dateFrom, dateTo]);
 
   useEffect(() => {
-    const role = localStorage.getItem("role");
-    setIsAdmin(canManageEmployees(role));
+    const storedRoles = getStoredRoles();
+    setIsAdmin(canManageEmployees(storedRoles));
   }, []);
 
   useEffect(() => {

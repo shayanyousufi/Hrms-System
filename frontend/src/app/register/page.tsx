@@ -30,7 +30,7 @@ export default function RegisterPage() {
 
     try {
       const response = await authApi.register({ email, password, phone });
-      saveSession(response.data.access_token, response.data.user.role);
+      saveSession(response.data.access_token, response.data.user.roles);
       setShowSuccess(true);
       setTimeout(() => {
         router.push("/login");

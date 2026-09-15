@@ -9,7 +9,7 @@ import {
   EmployeeReport,
   downloadFile,
 } from "@/lib/reportsApi";
-import { isAdminRole, isStaffRole } from "@/lib/auth";
+import { isAdminRole, isStaffRole, getStoredRoles } from "@/lib/auth";
 
 const departments = ["Engineering", "Design", "HR", "Finance", "Marketing", "Sales"];
 
@@ -34,9 +34,9 @@ export default function ReportsPage() {
   const [leaveType, setLeaveType] = useState("");
 
   useEffect(() => {
-    const role = localStorage.getItem("role");
-    setIsAdmin(isAdminRole(role));
-    setIsStaff(isStaffRole(role));
+    const storedRoles = getStoredRoles();
+    setIsAdmin(isAdminRole(storedRoles));
+    setIsStaff(isStaffRole(storedRoles));
   }, []);
 
   const buildParams = useCallback(() => {

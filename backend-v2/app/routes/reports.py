@@ -29,7 +29,7 @@ from app.schemas.reports import (
 
 router = APIRouter(prefix="/api/reports", tags=["reports"], dependencies=[Depends(get_current_user)])
 
-_SALARY_ROLES = {UserRole.SUPER_ADMIN.value, UserRole.HR.value}
+_SALARY_ROLE_NAMES = {UserRole.SUPER_ADMIN.value, UserRole.HR.value}
 
 
 def _parse_date(value: str, name: str) -> Optional[date_type]:
@@ -59,9 +59,9 @@ async def _team_ids(db: AsyncSession, current_user: User) -> tuple:
 
 async def _scope(db: AsyncSession, current_user: User) -> Optional[tuple]:
     """Return team/self employee-id restriction, or None for org-wide access."""
-    if current_user.role in _SALARY_ROLES:
+    if current_user.has_any_role(*_SALARY_ROLE_NAMES):
         return None
-    if current_user.role == UserRole.MANAGER.value:
+    if current_user.has_role(UserRole.MANAGER.value):
         return await _team_ids(db, current_user)
     # EMPLOYEE: always their own record.
     my = await _own_employee(db, current_user)
@@ -90,9 +90,9 @@ async def _assert_employee_allowed(
 
 
 def _scope_label(current_user: User) -> str:
-    if current_user.role in _SALARY_ROLES:
+    if current_user.has_any_role(*_SALARY_ROLE_NAMES):
         return "organization"
-    if current_user.role == UserRole.MANAGER.value:
+    if current_user.has_role(UserRole.MANAGER.value):
         return "team"
     return "self"
 
@@ -313,7 +313,7 @@ async def employee_report(
 
     employees = (await db.execute(query.order_by(Employee.id))).scalars().all()
 
-    include_salary = current_user.role in _SALARY_ROLES
+    include_salary = current_user.has_any_role(*_SALARY_ROLE_NAMES)
 
     rows = [EmployeeReportRow(
         id=e.id, employee_id=e.employee_id, first_name=e.first_name, last_name=e.last_name,

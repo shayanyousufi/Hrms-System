@@ -4,6 +4,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
 from app.core.deps import get_current_user
+from app.models.user import User  # noqa: F401 – register User mapper
+from app.models.employee import Employee  # noqa: F401 – register Employee mapper so User.employee relationship resolves
 from app.routes.auth import router as auth_router
 from app.routes.employees import router as employees_router
 from app.routes.attendance import router as attendance_router
