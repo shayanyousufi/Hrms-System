@@ -93,7 +93,7 @@ def generate_employee_id():
 @router.get("", response_model=PaginatedEmployees)
 async def list_employees(
     page: int = Query(1, ge=1),
-    per_page: int = Query(10, ge=1, le=100),
+    per_page: int = Query(10, ge=1, le=200),
     search: str = Query("", description="Search by name, email, employee_id"),
     department: str = Query("", description="Filter by department"),
     status_filter: str = Query("", alias="status", description="Filter by status"),
@@ -107,8 +107,11 @@ async def list_employees(
     query = select(Employee)
     count_query = select(func.count(Employee.id))
 
-    # Managers only see their direct reports — never all employees.
-    if current_user.has_role(UserRole.MANAGER.value):
+    # Managers only see their direct reports — unless they also have HR or SUPER_ADMIN.
+    is_only_manager = current_user.has_role(UserRole.MANAGER.value) and not (
+        current_user.has_role(UserRole.SUPER_ADMIN.value) or current_user.has_role(UserRole.HR.value)
+    )
+    if is_only_manager:
         my_employee = (await db.execute(
             select(Employee).where(Employee.user_id == current_user.id)
         )).scalar_one_or_none()

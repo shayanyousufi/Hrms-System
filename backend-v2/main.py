@@ -11,6 +11,7 @@ from app.routes.employees import router as employees_router
 from app.routes.attendance import router as attendance_router
 from app.routes.reports import router as reports_router
 from app.routes.imports import router as imports_router
+from app.routes.payroll import router as payroll_router
 
 app = FastAPI(title="Tech Land HRMS API", version="1.0.0")
 
@@ -27,6 +28,7 @@ app.include_router(employees_router)
 app.include_router(attendance_router)
 app.include_router(reports_router)
 app.include_router(imports_router)
+app.include_router(payroll_router)
 
 
 @app.on_event("startup")
