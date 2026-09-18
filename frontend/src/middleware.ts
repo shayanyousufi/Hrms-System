@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 
-const adminRoutes = ["/users"];
+const adminRoutes = ["/users", "/payroll"];
 const staffRoutes = ["/employees", "/attendance", "/leaves"];
 const protectedRoutes = ["/dashboard", ...staffRoutes, ...adminRoutes, "/reports"];
 const authRoutes = ["/login", "/register", "/"];
@@ -59,6 +59,7 @@ export const config = {
     "/leaves/:path*",
     "/users/:path*",
     "/reports/:path*",
+    "/payroll/:path*",
     "/login",
     "/register",
     "/",
