@@ -20,7 +20,10 @@ async def _load_user_with_roles(db: AsyncSession, user_id: int) -> User:
     result = await db.execute(
         select(User)
         .where(User.id == user_id)
-        .options(selectinload(User.user_roles_link).selectinload(UserRoleLink.role))
+        .options(
+            selectinload(User.user_roles_link).selectinload(UserRoleLink.role),
+            selectinload(User.employee),
+        )
     )
     return result.scalar_one_or_none()
 

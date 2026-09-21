@@ -33,6 +33,7 @@ export interface AuthUser {
   email: string;
   phone: string | null;
   roles: UserRole[];
+  employee_id?: string | null;
 }
 
 export interface AuthResponse {

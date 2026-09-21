@@ -10,6 +10,7 @@ import {
   clearSession,
   syncRoleCookie,
   getStoredRoles,
+  getStoredEmployeeId,
 } from "@/lib/auth";
 import type { UserRole } from "@/lib/api";
 
@@ -21,6 +22,7 @@ const allMenuItems = [
   { name: "Reports", href: "/reports", icon: "M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z", roles: ["SUPER_ADMIN", "HR", "MANAGER", "EMPLOYEE"] },
   { name: "Payroll", href: "/payroll", icon: "M17 9V7a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2m2 4h10a2 2 0 002-2v-6a2 2 0 00-2-2H9a2 2 0 00-2 2v6a2 2 0 002 2zm7-5a2 2 0 11-4 0 2 2 0 014 0z", roles: ADMIN_ROLES },
   { name: "Users & Roles", href: "/users", icon: "M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-3-5.196M13 7a4 4 0 11-8 0 4 4 0 018 0z", roles: ADMIN_ROLES },
+  { name: "Audit Log", href: "/audit-logs", icon: "M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01", roles: ["SUPER_ADMIN"] },
 ];
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
@@ -28,11 +30,15 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const router = useRouter();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [roles, setRoles] = useState<string[]>([]);
+  const [employeeId, setEmployeeId] = useState<string | null>(null);
+  const [profileOpen, setProfileOpen] = useState(false);
 
   useEffect(() => {
     syncRoleCookie();
     const stored = getStoredRoles();
+    const storedEmpId = getStoredEmployeeId();
     const token = localStorage.getItem("token");
+    if (storedEmpId) setEmployeeId(storedEmpId);
     if (token && stored.length > 0) {
       setRoles(stored);
     } else if (token) {
@@ -42,6 +48,10 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           .then((r) => {
             localStorage.setItem("roles", JSON.stringify(r.data.roles));
             setRoles(r.data.roles);
+            if (r.data.employee_id) {
+              localStorage.setItem("employee_id", r.data.employee_id);
+              setEmployeeId(r.data.employee_id);
+            }
           })
           .catch(() => clearSession())
       );
@@ -158,21 +168,55 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                   <path strokeLinecap="round" strokeLinejoin="round" d="M15 17h5l-1.4-1.4A2 2 0 0118 14.2V11a6 6 0 00-4-5.7V5a2 2 0 10-4 0v.3A6 6 0 006 11v3.2c0 .5-.2 1-.6 1.4L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
                 </svg>
               </button>
-              <div className="flex items-center gap-2.5 pl-1 pr-2 py-1 cursor-pointer">
-                <div className="w-9 h-9 rounded-full bg-gradient-to-br from-primary-400 to-primary-600 flex items-center justify-center text-white text-xs font-bold">
-                  {initials}
-                </div>
-                <div className="hidden sm:block leading-tight">
-                  <p className="text-xs font-bold text-gray-900">
-                    {roles.length > 0 ? roles.map((r) => ROLE_LABELS[r as UserRole] || r).join(", ") : "Account"}
-                  </p>
-                  <p className="text-[10px] text-gray-400">
-                    {roles.length > 0 ? roles.join(", ") : "\u2026"}
-                  </p>
-                </div>
-                <svg className="w-3 h-3 text-gray-400" fill="none" stroke="currentColor" strokeWidth="2.2" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
-                </svg>
+              <div className="relative">
+                <button
+                  onClick={() => setProfileOpen(!profileOpen)}
+                  className="flex items-center gap-2.5 pl-1 pr-2 py-1 cursor-pointer rounded-lg hover:bg-gray-50 transition-colors"
+                >
+                  <div className="w-9 h-9 rounded-full bg-gradient-to-br from-primary-400 to-primary-600 flex items-center justify-center text-white text-xs font-bold">
+                    {initials}
+                  </div>
+                  <div className="hidden sm:block leading-tight text-left">
+                    <p className="text-xs font-bold text-gray-900">
+                      {roles.length > 0 ? roles.map((r) => ROLE_LABELS[r as UserRole] || r).join(", ") : "Account"}
+                    </p>
+                    <p className="text-[10px] text-gray-400">
+                      {roles.length > 0 ? roles.join(", ") : "\u2026"}
+                    </p>
+                  </div>
+                  <svg className={`w-3 h-3 text-gray-400 transition-transform ${profileOpen ? "rotate-180" : ""}`} fill="none" stroke="currentColor" strokeWidth="2.2" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+                  </svg>
+                </button>
+
+                {profileOpen && (
+                  <>
+                    <div className="fixed inset-0 z-40" onClick={() => setProfileOpen(false)} />
+                    <div className="absolute right-0 top-full mt-2 w-48 bg-white rounded-xl shadow-lg border border-gray-100 py-1.5 z-50">
+                      {employeeId && (
+                        <Link
+                          href={`/employees/${employeeId}`}
+                          onClick={() => setProfileOpen(false)}
+                          className="flex items-center gap-2.5 px-4 py-2.5 text-sm text-gray-700 hover:bg-gray-50 transition-colors"
+                        >
+                          <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" strokeWidth="1.8" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+                          </svg>
+                          My Profile
+                        </Link>
+                      )}
+                      <button
+                        onClick={() => { setProfileOpen(false); handleLogout(); }}
+                        className="w-full flex items-center gap-2.5 px-4 py-2.5 text-sm text-red-600 hover:bg-red-50 transition-colors"
+                      >
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="1.8" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+                        </svg>
+                        Logout
+                      </button>
+                    </div>
+                  </>
+                )}
               </div>
               <button
                 onClick={() => setSidebarOpen(true)}

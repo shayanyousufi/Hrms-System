@@ -15,6 +15,12 @@ frontend/.env.local
 .env.*
 !.env.example
 
+# Uploads
+backend-v2/uploads/
+
+# Build artifacts
+frontend/tsconfig.tsbuildinfo
+
 # OS
 .DS_Store
 Thumbs.db

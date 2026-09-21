@@ -12,6 +12,8 @@ from app.routes.attendance import router as attendance_router
 from app.routes.reports import router as reports_router
 from app.routes.imports import router as imports_router
 from app.routes.payroll import router as payroll_router
+from app.routes.audit import router as audit_router
+from app.models.audit import AuditLog  # noqa: F401 – register AuditLog mapper
 
 app = FastAPI(title="Tech Land HRMS API", version="1.0.0")
 
@@ -29,6 +31,7 @@ app.include_router(attendance_router)
 app.include_router(reports_router)
 app.include_router(imports_router)
 app.include_router(payroll_router)
+app.include_router(audit_router)
 
 
 @app.on_event("startup")

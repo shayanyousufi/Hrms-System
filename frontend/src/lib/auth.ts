@@ -47,10 +47,13 @@ export function canApproveLeaves(role?: string | null | string[]): boolean {
   return isStaffRole(role);
 }
 
-export function saveSession(token: string, roles: string[]): void {
+export function saveSession(token: string, roles: string[], employeeId?: string | null): void {
   if (typeof window === "undefined") return;
   localStorage.setItem("token", token);
   localStorage.setItem("roles", JSON.stringify(roles));
+  if (employeeId) {
+    localStorage.setItem("employee_id", employeeId);
+  }
   document.cookie = `token=${token}; path=/; max-age=86400`;
   document.cookie = `role=${roles[0] ?? ""}; path=/; max-age=86400`;
   document.cookie = `roles=${roles.join(",")}; path=/; max-age=86400`;
@@ -61,6 +64,7 @@ export function clearSession(): void {
   localStorage.removeItem("token");
   localStorage.removeItem("roles");
   localStorage.removeItem("role");
+  localStorage.removeItem("employee_id");
   document.cookie = "token=; path=/; max-age=0";
   document.cookie = "role=; path=/; max-age=0";
   document.cookie = "roles=; path=/; max-age=0";
@@ -82,6 +86,11 @@ export function getStoredRole(): string | null {
   if (typeof window === "undefined") return null;
   const roles = getStoredRoles();
   return roles.length > 0 ? roles[0] : null;
+}
+
+export function getStoredEmployeeId(): string | null {
+  if (typeof window === "undefined") return null;
+  return localStorage.getItem("employee_id");
 }
 
 /** Best-effort sync of stale/missing role cookies from localStorage. */

@@ -70,8 +70,9 @@ export default function UsersPage() {
       const updated = await authApi.updateRolesBulk(user.id, roles);
       setUsers((prev) => prev.map((u) => (u.id === user.id ? { ...u, roles: updated.data.roles } : u)));
       showToast(`Roles updated to ${roles.join(", ")}`);
-    } catch {
-      showToast("Failed to update roles");
+    } catch (e: any) {
+      const msg = e?.response?.data?.detail || e?.message || "Failed to update roles";
+      showToast(msg);
     } finally {
       setBusyId(null);
     }

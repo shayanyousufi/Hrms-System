@@ -20,6 +20,7 @@ from app.core.config import settings, UserRole
 from app.models.user import User, PasswordReset
 from app.models.role import Role, UserRole as UserRoleLink
 from app.models.employee import Employee
+from app.models.audit import AuditLog
 from app.schemas.auth import (
     RegisterRequest,
     LoginRequest,
@@ -72,6 +73,26 @@ async def _replace_roles_bulk(db: AsyncSession, user_id: int, role_names: list[s
         ), {"uid": user_id, "rname": name})
 
 
+async def _log_role_change(
+    db: AsyncSession,
+    action: str,
+    target_user_id: int,
+    performed_by: int,
+    old_value: str | None,
+    new_value: str | None,
+    ip_address: str | None = None,
+) -> None:
+    log = AuditLog(
+        action=action,
+        target_user_id=target_user_id,
+        performed_by=performed_by,
+        old_value=old_value,
+        new_value=new_value,
+        ip_address=ip_address,
+    )
+    db.add(log)
+
+
 @router.post("/register", response_model=AuthResponse)
 async def register(data: RegisterRequest, db: AsyncSession = Depends(get_db)):
     existing_user = await get_user_by_email(db, data.email)
@@ -113,9 +134,13 @@ async def login(data: LoginRequest, db: AsyncSession = Depends(get_db)):
 
     access_token = create_access_token(data={"sub": str(user.id)})
 
+    emp_id = None
+    if user.employee:
+        emp_id = user.employee.employee_id
+
     return AuthResponse(
         access_token=access_token,
-        user=UserResponse(id=user.id, email=user.email, phone=user.phone, roles=user.role_names),
+        user=UserResponse(id=user.id, email=user.email, phone=user.phone, roles=user.role_names, employee_id=emp_id),
     )
 
 
@@ -193,11 +218,15 @@ async def reset_password(data: ResetPasswordRequest, db: AsyncSession = Depends(
 
 @router.get("/me", response_model=UserResponse)
 async def get_me(current_user: User = Depends(get_current_user)):
+    emp_id = None
+    if current_user.employee:
+        emp_id = current_user.employee.employee_id
     return UserResponse(
         id=current_user.id,
         email=current_user.email,
         phone=current_user.phone,
         roles=current_user.role_names,
+        employee_id=emp_id,
     )
 
 
@@ -235,10 +264,14 @@ async def update_role(
 
     requested = data.role.value if isinstance(data.role, UserRole) else str(data.role)
 
-    if current_user.has_role(UserRole.HR.value) and requested in {
-        UserRole.HR.value,
-        UserRole.SUPER_ADMIN.value,
-    }:
+    if (
+        not current_user.has_role(UserRole.SUPER_ADMIN.value)
+        and current_user.has_role(UserRole.HR.value)
+        and requested in {
+            UserRole.HR.value,
+            UserRole.SUPER_ADMIN.value,
+        }
+    ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="HR can only assign EMPLOYEE or MANAGER roles",
@@ -247,7 +280,13 @@ async def update_role(
     target_id = target.id
     target_email = target.email
     target_phone = target.phone
+    old_roles = ", ".join(target.role_names) if target.role_names else "(none)"
     await _replace_role(db, target_id, requested)
+    await _log_role_change(
+        db, action="role_replaced",
+        target_user_id=target_id, performed_by=current_user.id,
+        old_value=old_roles, new_value=requested,
+    )
     await db.commit()
     return UserResponse(id=target_id, email=target_email, phone=target_phone, roles=[requested])
 
@@ -270,8 +309,12 @@ async def update_roles_bulk(
 
     requested_names = [r.value for r in data.roles]
 
-    if current_user.has_role(UserRole.HR.value) and any(
-        r in {UserRole.HR.value, UserRole.SUPER_ADMIN.value} for r in requested_names
+    if (
+        not current_user.has_role(UserRole.SUPER_ADMIN.value)
+        and current_user.has_role(UserRole.HR.value)
+        and any(
+            r in {UserRole.HR.value, UserRole.SUPER_ADMIN.value} for r in requested_names
+        )
     ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -281,7 +324,14 @@ async def update_roles_bulk(
     target_id = target.id
     target_email = target.email
     target_phone = target.phone
+    old_roles = ", ".join(target.role_names) if target.role_names else "(none)"
+    new_roles = ", ".join(requested_names) if requested_names else "(none)"
     await _replace_roles_bulk(db, target_id, requested_names)
+    await _log_role_change(
+        db, action="roles_bulk_updated",
+        target_user_id=target_id, performed_by=current_user.id,
+        old_value=old_roles, new_value=new_roles,
+    )
     await db.commit()
     return UserResponse(id=target_id, email=target_email, phone=target_phone, roles=requested_names)
 

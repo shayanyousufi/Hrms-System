@@ -30,6 +30,7 @@ class UserResponse(BaseModel):
     email: str
     phone: Optional[str] = None
     roles: list[str] = [UserRole.EMPLOYEE.value]
+    employee_id: Optional[str] = None
 
     class Config:
         from_attributes = True

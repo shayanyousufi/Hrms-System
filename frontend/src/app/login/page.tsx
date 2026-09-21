@@ -23,7 +23,7 @@ export default function LoginPage() {
     try {
       const response = await authApi.login({ email, password });
       const { access_token, user } = response.data;
-      saveSession(access_token, user.roles);
+      saveSession(access_token, user.roles, user.employee_id);
       setShowWelcome(true);
       setTimeout(() => {
         router.push("/dashboard");
