@@ -6,7 +6,7 @@ import io
 import uuid
 from datetime import timedelta, datetime as dt, date as date_type
 from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, or_, desc, asc, text
 import base64
@@ -15,7 +15,7 @@ from app.core.database import get_db
 from app.core.deps import get_current_user, require_roles, get_current_employee
 from app.core.config import UserRole
 from app.core.storage import (
-    save_document, resolve_stored_path, delete_document,
+    save_document, fetch_document, delete_document,
 )
 from app.models.employee import (
     Employee, Attendance, LeaveRecord, EmployeeDocument, ActivityLog, Task, Meeting
@@ -741,25 +741,20 @@ async def download_document(
     if not doc.stored_filename:
         raise HTTPException(status_code=404, detail="No file attached to this document")
 
-    path = resolve_stored_path(doc.stored_filename)
-    if not path.exists():
-        raise HTTPException(status_code=404, detail="File not found on disk")
+    try:
+        data = fetch_document(doc.stored_filename)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="File not found in storage")
 
     content_type = doc.content_type or "application/octet-stream"
     filename = doc.name or f"document-{doc.id}"
     disposition = f'attachment; filename="{_ascii_fallback(filename)}"'
 
-    return StreamingResponse(
-        _iter_file(path),
+    return Response(
+        content=data,
         media_type=content_type,
         headers={"Content-Disposition": disposition},
     )
-
-
-def _iter_file(path):
-    with open(path, "rb") as f:
-        while chunk := f.read(64 * 1024):
-            yield chunk
 
 
 def _ascii_fallback(name: str) -> str:

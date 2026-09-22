@@ -38,6 +38,16 @@ class Settings:
     # Local protected upload directory for employee documents (not in public webroot).
     UPLOAD_DIR: str = os.getenv("UPLOAD_DIR", "./uploads")
 
+    # Backblaze B2 (S3-compatible) for employee document storage.
+    B2_KEY_ID: str = os.getenv("B2_KEY_ID", "")
+    B2_APP_KEY: str = os.getenv("B2_APP_KEY", "")
+    B2_BUCKET: str = os.getenv("B2_BUCKET", "")
+    B2_ENDPOINT: str = os.getenv("B2_ENDPOINT", "")
+
+    @property
+    def b2_configured(self) -> bool:
+        return bool(self.B2_KEY_ID and self.B2_APP_KEY and self.B2_BUCKET and self.B2_ENDPOINT)
+
     def validate(self) -> None:
         secret = (self.JWT_SECRET_KEY or "").strip()
         if not secret:
