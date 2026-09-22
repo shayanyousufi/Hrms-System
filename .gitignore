@@ -8,6 +8,18 @@ backend-v2/.env
 # Frontend
 frontend/node_modules/
 frontend/.next/
+frontend/.env.local
+
+# Environment files (keep .env.example)
+.env
+.env.*
+!.env.example
+
+# Uploads
+backend-v2/uploads/
+
+# Build artifacts
+frontend/tsconfig.tsbuildinfo
 
 # OS
 .DS_Store

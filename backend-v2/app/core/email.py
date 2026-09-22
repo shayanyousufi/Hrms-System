@@ -6,7 +6,7 @@ import traceback
 from app.core.config import settings
 
 
-def send_reset_email(to_email: str, code: str) -> tuple[bool, str]:
+def send_reset_email(to_email: str, token: str) -> tuple[bool, str]:
     try:
         if not settings.SMTP_USER or not settings.SMTP_PASSWORD:
             return False, "SMTP not configured"
@@ -22,10 +22,10 @@ def send_reset_email(to_email: str, code: str) -> tuple[bool, str]:
             <div style="max-width: 400px; margin: auto; background: #f9f9f9; border-radius: 16px; padding: 30px; text-align: center;">
                 <h2 style="color: #7e22ce;">Tech Land</h2>
                 <p style="color: #666;">You requested a password reset.</p>
-                <div style="background: #7e22ce; color: white; font-size: 24px; font-weight: bold; padding: 15px; border-radius: 8px; letter-spacing: 8px; margin: 20px 0;">
-                    {code}
+                <div style="background: #7e22ce; color: white; font-size: 13px; font-weight: bold; padding: 15px; border-radius: 8px; letter-spacing: 1px; word-break: break-all; margin: 20px 0;">
+                    {token}
                 </div>
-                <p style="color: #999; font-size: 12px;">This code expires in 10 minutes.</p>
+                <p style="color: #999; font-size: 12px;">This code expires in {settings.PASSWORD_RESET_TOKEN_EXPIRE_MINUTES} minutes.</p>
                 <p style="color: #999; font-size: 12px;">If you didn't request this, ignore this email.</p>
             </div>
         </body>

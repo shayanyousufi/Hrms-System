@@ -28,8 +28,7 @@ export default function RegisterPage() {
     setLoading(true);
 
     try {
-      const response = await authApi.register({ email, password, phone });
-      localStorage.setItem("token", response.data.access_token);
+      await authApi.register({ email, password, phone });
       setShowSuccess(true);
       setTimeout(() => {
         router.push("/login");
