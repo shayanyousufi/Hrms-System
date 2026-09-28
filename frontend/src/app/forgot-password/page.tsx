@@ -8,9 +8,6 @@ export default function ForgotPasswordPage() {
   const [email, setEmail] = useState("");
   const [error, setError] = useState("");
   const [success, setSuccess] = useState(false);
-  const [code, setCode] = useState("");
-  const [emailSent, setEmailSent] = useState(false);
-  const [emailError, setEmailError] = useState("");
   const [loading, setLoading] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -19,10 +16,7 @@ export default function ForgotPasswordPage() {
     setLoading(true);
 
     try {
-      const response = await authApi.forgotPassword(email);
-      setCode(response.data.code || "");
-      setEmailSent(response.data.email_sent || false);
-      setEmailError(response.data.email_error || "");
+      await authApi.forgotPassword(email);
       setSuccess(true);
     } catch (err: any) {
       setError(err.response?.data?.detail || "Something went wrong");
@@ -65,21 +59,9 @@ export default function ForgotPasswordPage() {
                 </svg>
               </div>
 
-              {emailSent ? (
-                <p className="text-sm text-gray-600 mb-4">Reset code sent to <strong>{email}</strong>!</p>
-              ) : (
-                <div className="mb-4">
-                  <p className="text-sm text-orange-500 mb-1">Email bhejne mein problem aayi!</p>
-                  <p className="text-xs text-gray-400">Neeche code de ke manually reset kar sakte ho</p>
-                </div>
-              )}
-
-              {code && (
-                <div className="bg-primary-50 border border-primary-200 rounded-xl p-4 mb-4">
-                  <p className="text-xs text-gray-500 mb-1">Your reset code:</p>
-                  <p className="text-2xl font-bold text-primary-700 tracking-widest">{code}</p>
-                </div>
-              )}
+              <p className="text-sm text-gray-600 mb-4">
+                If an account exists for <strong>{email}</strong>, a reset code has been sent to your email.
+              </p>
 
               <Link href="/reset-password" className="inline-block bg-gradient-to-r from-primary-500 to-primary-400 text-white px-6 py-2.5 rounded-full font-semibold text-sm hover:from-primary-600 hover:to-primary-500 transition-all">
                 Enter Reset Code

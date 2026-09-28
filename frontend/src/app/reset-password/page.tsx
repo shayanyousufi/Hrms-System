@@ -7,7 +7,8 @@ import { authApi } from "@/lib/api";
 
 export default function ResetPasswordPage() {
   const router = useRouter();
-  const [code, setCode] = useState("");
+  const [email, setEmail] = useState("");
+  const [token, setToken] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState("");
@@ -25,11 +26,11 @@ export default function ResetPasswordPage() {
     setLoading(true);
 
     try {
-      await authApi.resetPassword(code, newPassword);
+      await authApi.resetPassword(email, token, newPassword);
       alert("Password reset successful!");
       router.push("/login");
     } catch (err: any) {
-      setError(err.response?.data?.detail || "Invalid or expired code");
+      setError(err.response?.data?.detail || "Invalid or expired reset token");
     } finally {
       setLoading(false);
     }
@@ -63,12 +64,24 @@ export default function ResetPasswordPage() {
 
           <form onSubmit={handleSubmit}>
             <div className="mb-4">
+              <label className="block text-xs text-primary-600 font-medium mb-1.5">Email Address</label>
+              <input
+                type="email"
+                placeholder="example@gmail.com"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl text-sm outline-none focus:border-primary-400 transition-colors"
+                required
+              />
+            </div>
+
+            <div className="mb-4">
               <label className="block text-xs text-primary-600 font-medium mb-1.5">Reset Code</label>
               <input
                 type="text"
-                placeholder="Enter 6-digit code"
-                value={code}
-                onChange={(e) => setCode(e.target.value)}
+                placeholder="Paste the reset code from your email"
+                value={token}
+                onChange={(e) => setToken(e.target.value)}
                 className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl text-sm outline-none focus:border-primary-400 transition-colors"
                 required
               />

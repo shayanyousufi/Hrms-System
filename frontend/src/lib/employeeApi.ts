@@ -120,8 +120,12 @@ export interface DocumentRecord {
   employee_id: number;
   name: string;
   doc_type: string;
-  file_url: string | null;
+  has_file: boolean;
+  content_type: string | null;
+  file_size: number | null;
   uploaded_at: string | null;
+  uploaded_by: number | null;
+  uploaded_by_name: string | null;
 }
 
 export interface ActivityRecord {
@@ -182,7 +186,7 @@ export interface DashboardStats {
   inactive: number;
   pending_leaves: number;
   departments: { name: string; count: number }[];
-  attendance_today: { present: number; absent: number; leave: number };
+  attendance_today: { present: number; absent: number; leave: number; late: number };
 }
 
 export interface AttendanceRecordWithEmployee {
@@ -305,6 +309,19 @@ export const employeesApi = {
 
   getDocuments: (employeeId: string) =>
     api.get<DocumentRecord[]>(`/employees/${employeeId}/documents`).then((r) => r.data),
+
+  uploadDocument: (employeeId: string, file: File, docType = "General") => {
+    const formData = new FormData();
+    formData.append("file", file);
+    return api
+      .post<DocumentRecord>(`/employees/${employeeId}/documents?doc_type=${encodeURIComponent(docType)}`, formData, {
+        headers: { "Content-Type": "multipart/form-data" },
+      })
+      .then((r) => r.data);
+  },
+
+  deleteDocument: (employeeId: string, documentId: number) =>
+    api.delete(`/employees/${employeeId}/documents/${documentId}`).then((r) => r.data),
 
   getActivities: (employeeId: string, params: URLSearchParams) =>
     api.get<PaginatedActivities>(`/employees/${employeeId}/activities?${params.toString()}`).then((r) => r.data),

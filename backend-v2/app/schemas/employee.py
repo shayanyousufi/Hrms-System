@@ -122,11 +122,12 @@ class DocumentResponse(BaseModel):
     employee_id: int
     name: str
     doc_type: str
-    file_url: Optional[str] = None
+    has_file: bool = False
+    content_type: Optional[str] = None
+    file_size: Optional[int] = None
     uploaded_at: Optional[datetime] = None
-
-    class Config:
-        from_attributes = True
+    uploaded_by: Optional[int] = None
+    uploaded_by_name: Optional[str] = None
 
 
 class ActivityLogResponse(BaseModel):
